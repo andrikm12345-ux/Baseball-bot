@@ -46,18 +46,19 @@ class OddsApiError(Exception):
         self.body = body
 
 
-# Currently unused — odds-api.io rejected every slug we tried with 404
-# "League not found". Kept for the day we learn the real slugs.
+# odds-api.io uses slugs in the form "{country}-{league}" (observed:
+# "czechia-cfl"). These are the most likely slugs for our top competitions —
+# the client logs the discovered list on first run so we can adjust.
 COMPETITION_TO_LEAGUE = {
-    "PL": "premier-league",
-    "PD": "la-liga",
-    "SA": "serie-a",
-    "BL1": "bundesliga",
-    "FL1": "ligue-1",
-    "CL": "champions-league",
-    "PPL": "primeira-liga",
-    "DED": "eredivisie",
-    "ELC": "championship",
+    "PL": "england-premier-league",
+    "PD": "spain-laliga",
+    "SA": "italy-serie-a",
+    "BL1": "germany-bundesliga",
+    "FL1": "france-ligue-1",
+    "CL": "uefa-champions-league",
+    "PPL": "portugal-primeira-liga",
+    "DED": "netherlands-eredivisie",
+    "ELC": "england-championship",
 }
 
 
@@ -130,6 +131,8 @@ class OddsApiClient:
             params["league"] = league
         try:
             data = await self._get("/events", params)
+        except OddsApiError:
+            raise
         except Exception as e:
             logger.warning(f"fetch_events failed (sport={sport} league={league}): {e}")
             return []
@@ -372,35 +375,58 @@ def extract_odds(
 # ─────────────────────────── top-level orchestration ───────────────────────────
 
 
+def _is_upcoming(ev: Dict[str, Any], now: datetime) -> bool:
+    status = str(ev.get("status", "")).lower()
+    if status in {"settled", "finished", "ended", "cancelled", "canceled", "postponed"}:
+        return False
+    kickoff = _event_kickoff(ev)
+    if kickoff is None:
+        return True  # keep — better to try than drop
+    return kickoff >= now - timedelta(hours=2)  # 2h grace for in-play
+
+
 async def fetch_odds_for_matches(
     client: OddsApiClient,
     upcoming: List[Tuple[int, str, str, str, datetime]],
 ) -> Dict[int, Dict[str, float]]:
     """upcoming: (match_id, competition, home_name, away_name, utc_date).
 
-    Strategy: one global /events?sport=football call returns all upcoming
-    football matches across all leagues. We match by team name + kickoff —
-    league filter is skipped because odds-api.io's league slugs are not
-    documented and 4xx errors burn the daily quota fast.
+    Strategy: per-league /events call using slugs from COMPETITION_TO_LEAGUE
+    (format observed in their API is "{country}-{league}"). Filter out
+    already-settled events locally. If a slug returns 404 we drop it from
+    future attempts to save quota.
     """
     if not upcoming:
         return {}
 
-    events = await client.fetch_events(sport="football", limit=500)
-    logger.info(f"odds-api.io: {len(events)} football events available")
-    if not events:
-        return {}
+    now = datetime.utcnow()
+    events_cache: Dict[str, List[Dict[str, Any]]] = {}
+    bad_slugs: set[str] = set()
+
+    for _, comp, _, _, _ in upcoming:
+        if comp in events_cache:
+            continue
+        league = COMPETITION_TO_LEAGUE.get(comp)
+        if league and league not in bad_slugs:
+            try:
+                evs = await client.fetch_events(sport="football", league=league, limit=200)
+            except OddsApiError as e:
+                if e.status == 404:
+                    bad_slugs.add(league)
+                    evs = []
+                else:
+                    evs = []
+        else:
+            evs = []
+        evs = [ev for ev in evs if _is_upcoming(ev, now)]
+        events_cache[comp] = evs
+        logger.info(f"odds-api.io: {len(evs)} upcoming events for {comp} (league={league})")
 
     out: Dict[int, Dict[str, float]] = {}
-    # Log what teams we see in odds-api.io events for diagnosis
-    sample_teams = [
-        f"{_event_teams(ev)[0]!r} vs {_event_teams(ev)[1]!r}" for ev in events[:5]
-    ]
-    logger.info(f"odds-api.io sample teams: {sample_teams}")
-    sample_kickoffs = [_event_kickoff(ev) for ev in events[:3]]
-    logger.info(f"odds-api.io sample kickoffs: {sample_kickoffs}")
-
-    for match_id, _comp, home, away, kickoff in upcoming:
+    for match_id, comp, home, away, kickoff in upcoming:
+        events = events_cache.get(comp) or []
+        if not events:
+            continue
         ev = _best_match(home, away, kickoff, events)
         if not ev:
             continue
