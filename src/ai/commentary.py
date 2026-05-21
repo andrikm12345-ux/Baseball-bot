@@ -17,7 +17,7 @@ from src.config import settings
 
 
 API_URL = "https://api.anthropic.com/v1/messages"
-MODEL = "claude-haiku-4-5-20251001"
+MODEL = "claude-opus-4-7"
 
 _cache: Dict[str, str] = {}
 
