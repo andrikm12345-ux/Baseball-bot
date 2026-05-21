@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 from loguru import logger
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 
 BASE_URL = "https://api.odds-api.io/v3"
@@ -38,10 +38,16 @@ BASE_URL = "https://api.odds-api.io/v3"
 DEFAULT_BOOKMAKERS = "Bet365,Betfair Exchange"
 
 
-# Our football-data.org competition codes → odds-api.io league slugs.
-# League slugs are guessed from the docs example URL ?league=premier-league;
-# if the API rejects the slug we just fall through to no-league filter and
-# match by team name + kickoff time.
+class OddsApiError(Exception):
+    """Raised on non-retryable HTTP errors from odds-api.io (4xx)."""
+    def __init__(self, status: int, body: str) -> None:
+        super().__init__(f"odds-api.io {status}: {body[:200]}")
+        self.status = status
+        self.body = body
+
+
+# Currently unused — odds-api.io rejected every slug we tried with 404
+# "League not found". Kept for the day we learn the real slugs.
 COMPETITION_TO_LEAGUE = {
     "PL": "premier-league",
     "PD": "la-liga",
@@ -82,7 +88,11 @@ class OddsApiClient:
         if self._session and not self._session.closed:
             await self._session.close()
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=2, min=2, max=20))
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=2, min=2, max=20),
+        retry=retry_if_exception_type((aiohttp.ClientConnectionError, asyncio.TimeoutError)),
+    )
     async def _get(self, path: str, params: Dict[str, Any]) -> Any:
         cache_key = f"{path}?{sorted(params.items())}"
         now = asyncio.get_event_loop().time()
@@ -96,11 +106,11 @@ class OddsApiClient:
             if r.status == 429:
                 logger.warning("odds-api.io rate-limited, backing off 30s")
                 await asyncio.sleep(30)
-                r.raise_for_status()
             if r.status >= 400:
                 text = await r.text()
                 logger.warning(f"odds-api.io {r.status} on {path}: {text[:200]}")
-                r.raise_for_status()
+                # 4xx is a hard error — don't retry, don't burn quota
+                raise OddsApiError(r.status, text)
             remaining = r.headers.get("x-requests-remaining") or r.headers.get("X-RateLimit-Remaining")
             if remaining:
                 logger.info(f"odds-api.io quota remaining: {remaining}")
@@ -112,7 +122,7 @@ class OddsApiClient:
         self,
         sport: str = "football",
         league: Optional[str] = None,
-        limit: int = 200,
+        limit: int = 500,
     ) -> List[Dict[str, Any]]:
         params: Dict[str, Any] = {"sport": sport, "limit": limit}
         if league:
@@ -355,28 +365,23 @@ async def fetch_odds_for_matches(
     client: OddsApiClient,
     upcoming: List[Tuple[int, str, str, str, datetime]],
 ) -> Dict[int, Dict[str, float]]:
-    """upcoming: (match_id, competition, home_name, away_name, utc_date)."""
+    """upcoming: (match_id, competition, home_name, away_name, utc_date).
+
+    Strategy: one global /events?sport=football call returns all upcoming
+    football matches across all leagues. We match by team name + kickoff —
+    league filter is skipped because odds-api.io's league slugs are not
+    documented and 4xx errors burn the daily quota fast.
+    """
     if not upcoming:
         return {}
 
-    # Step 1: one /events call per league we care about (typically 6) — cheaper
-    # than scanning the entire football catalog repeatedly.
-    events_cache: Dict[str, List[Dict[str, Any]]] = {}
-    for _, comp, _, _, _ in upcoming:
-        if comp in events_cache:
-            continue
-        league = COMPETITION_TO_LEAGUE.get(comp)
-        evs = await client.fetch_events(sport="football", league=league)
-        if not evs and league:
-            # league slug might be wrong — retry without filter once per comp
-            evs = await client.fetch_events(sport="football")
-        events_cache[comp] = evs
-        logger.info(f"odds-api.io: {len(evs)} events for {comp} (league={league})")
+    events = await client.fetch_events(sport="football", limit=500)
+    logger.info(f"odds-api.io: {len(events)} football events available")
+    if not events:
+        return {}
 
-    # Step 2: for each match, find the event and pull odds for it.
     out: Dict[int, Dict[str, float]] = {}
-    for match_id, comp, home, away, kickoff in upcoming:
-        events = events_cache.get(comp) or []
+    for match_id, _comp, home, away, kickoff in upcoming:
         ev = _best_match(home, away, kickoff, events)
         if not ev:
             continue
