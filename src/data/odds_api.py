@@ -62,12 +62,20 @@ COMPETITION_TO_LEAGUE = {
 }
 
 
-# Market-name candidates. odds-api.io uses short codes ("ML" for 1X2 in docs);
-# the OU/BTTS codes are not shown in the quickstart, so we accept several
-# common spellings and log unknown ones so we can extend this list.
+# Market-name candidates. Observed names from odds-api.io:
+#   "ML" (1X2)            "Goals Over/Under" (totals with hdp)
+#   "Both Teams To Score" "Totals" (alt totals with hdp 2.75 sometimes)
+# We accept several spellings so the parser works across bookmakers.
 ML_NAMES = {"ml", "1x2", "match winner", "moneyline", "h2h"}
-OU_NAMES = {"ou", "totals", "over/under", "over_under", "total"}
-BTTS_NAMES = {"btts", "both teams to score", "gg/ng", "both_teams_to_score"}
+OU_NAMES = {
+    "ou", "totals", "total", "over/under", "over_under",
+    "goals over/under", "goals_over_under", "goals over under",
+    "match goals", "match total goals",
+}
+BTTS_NAMES = {
+    "btts", "both teams to score", "both_teams_to_score",
+    "gg/ng", "both score",
+}
 
 
 class OddsApiClient:
@@ -303,7 +311,18 @@ def extract_odds(
     event_home: str = "",
     event_away: str = "",
 ) -> Dict[str, float]:
-    """Walk through bookmakers→markets→outcomes and aggregate max odd per pick."""
+    """Parse odds-api.io payload and aggregate max odd per pick.
+
+    Observed odds-api.io market shape:
+      {"name": "ML", "odds": [{"home": "2.7", "draw": "3.4", "away": "2.6"}]}
+      {"name": "Goals Over/Under",
+       "odds": [{"hdp": 1.5, "over": "...", "under": "..."},
+                {"hdp": 2.5, "over": "1.727", "under": "2.100"}, ...]}
+      {"name": "Both Teams To Score", "odds": [{"yes": "1.533", "no": "2.375"}]}
+    Prices come as strings, lines come as numbers in "hdp". Some markets like
+    "Totals" share names with OU but use a different handicap (e.g. 2.75) —
+    we strictly require hdp == 2.5 for our totals signal.
+    """
     aggregated: Dict[str, List[float]] = {
         "odds_home": [], "odds_draw": [], "odds_away": [],
         "odds_over25": [], "odds_under25": [],
@@ -315,54 +334,54 @@ def extract_odds(
     if not isinstance(books, dict):
         return {k: 0.0 for k in aggregated}
 
-    home_candidates = {"home", home_name.lower(), event_home.lower(), "1"}
-    away_candidates = {"away", away_name.lower(), event_away.lower(), "2"}
-    draw_candidates = {"draw", "x", "tie"}
     unknown_markets: set[str] = set()
 
-    for bk_name, markets in books.items():
+    for _bk_name, markets in books.items():
         if not isinstance(markets, list):
             markets = markets.get("markets", []) if isinstance(markets, dict) else []
         for market in markets:
             if not isinstance(market, dict):
                 continue
             name = _market_name(market)
-            outcomes = _extract_market_outcomes(market)
-            if not outcomes:
-                continue
+            odds_list = market.get("odds")
+            if not isinstance(odds_list, list):
+                odds_list = [odds_list] if isinstance(odds_list, dict) else []
 
             if name in ML_NAMES:
-                for label, val in outcomes.items():
-                    f = _as_float(val)
-                    if f is None:
+                for entry in odds_list:
+                    if not isinstance(entry, dict):
                         continue
-                    if any(_name_similarity(label, c) > 0.7 for c in home_candidates):
-                        aggregated["odds_home"].append(f)
-                    elif label in draw_candidates:
-                        aggregated["odds_draw"].append(f)
-                    elif any(_name_similarity(label, c) > 0.7 for c in away_candidates):
-                        aggregated["odds_away"].append(f)
+                    h = _as_float(entry.get("home"))
+                    d = _as_float(entry.get("draw"))
+                    a = _as_float(entry.get("away"))
+                    if h: aggregated["odds_home"].append(h)
+                    if d: aggregated["odds_draw"].append(d)
+                    if a: aggregated["odds_away"].append(a)
             elif name in OU_NAMES:
-                line = _market_line(market)
-                if line is not None and abs(line - 2.5) > 0.01:
-                    continue
-                for label, val in outcomes.items():
-                    f = _as_float(val)
-                    if f is None:
+                for entry in odds_list:
+                    if not isinstance(entry, dict):
                         continue
-                    if "over" in label or label == "o":
-                        aggregated["odds_over25"].append(f)
-                    elif "under" in label or label == "u":
-                        aggregated["odds_under25"].append(f)
+                    # Strict: require hdp == 2.5. Markets like "Totals" with
+                    # hdp 2.75 are not what we predict.
+                    hdp = entry.get("hdp")
+                    try:
+                        hdp_f = float(hdp) if hdp is not None else None
+                    except (TypeError, ValueError):
+                        hdp_f = None
+                    if hdp_f is None or abs(hdp_f - 2.5) > 0.01:
+                        continue
+                    over = _as_float(entry.get("over"))
+                    under = _as_float(entry.get("under"))
+                    if over: aggregated["odds_over25"].append(over)
+                    if under: aggregated["odds_under25"].append(under)
             elif name in BTTS_NAMES:
-                for label, val in outcomes.items():
-                    f = _as_float(val)
-                    if f is None:
+                for entry in odds_list:
+                    if not isinstance(entry, dict):
                         continue
-                    if label in {"yes", "gg", "y"}:
-                        aggregated["odds_btts_yes"].append(f)
-                    elif label in {"no", "ng", "n"}:
-                        aggregated["odds_btts_no"].append(f)
+                    yes = _as_float(entry.get("yes"))
+                    no = _as_float(entry.get("no"))
+                    if yes: aggregated["odds_btts_yes"].append(yes)
+                    if no: aggregated["odds_btts_no"].append(no)
             else:
                 unknown_markets.add(name)
 
