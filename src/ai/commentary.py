@@ -17,7 +17,7 @@ from src.config import settings
 
 
 API_URL = "https://api.anthropic.com/v1/messages"
-MODEL = "claude-opus-4-7"
+MODEL = "claude-sonnet-4-6"
 
 _cache: Dict[str, str] = {}
 
@@ -80,7 +80,7 @@ async def generate_commentary(
     )
     body = {
         "model": MODEL,
-        "max_tokens": 200,
+        "max_tokens": 350,
         "messages": [{"role": "user", "content": prompt}],
     }
     headers = {
