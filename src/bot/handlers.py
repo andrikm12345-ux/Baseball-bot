@@ -271,6 +271,9 @@ async def broadcast_signal(bot: Bot, text: str) -> int:
         subs = (await session.execute(
             select(Subscriber).where(Subscriber.active.is_(True))
         )).scalars().all()
+    if not subs:
+        logger.warning("broadcast_signal: no active subscribers — nobody to send to")
+        return 0
     for s in subs:
         try:
             await bot.send_message(s.chat_id, text, parse_mode="HTML")
