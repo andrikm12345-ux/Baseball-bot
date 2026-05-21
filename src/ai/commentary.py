@@ -1,13 +1,18 @@
-"""Claude-generated short analytical commentaries for signals.
+"""LLM-generated short analytical commentaries for signals.
 
-We feed the model the structured stats we already computed (form, Elo, etc.)
-and ask for a 2-3 sentence commentary in Russian. Output is cached per
-(match_id, market, pick) so we don't pay for the same answer twice.
+Supports two backends:
+  1. Native Anthropic API (default) — POST {anthropic}/v1/messages with x-api-key.
+  2. OpenAI-compatible proxy (NeuroAPI, OpenRouter, vLLM, ...) — POST
+     {LLM_BASE_URL}/chat/completions with Authorization: Bearer ....
+
+Switching is automatic: set LLM_BASE_URL to a proxy and the OpenAI path is used.
+Leave it empty and we hit Anthropic directly. Both paths take the same prompt
+and return the same commentary string. Output is cached per (match, market, pick)
+so we don't pay for the same answer twice.
 """
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import Dict, Optional
 
 import aiohttp
@@ -15,9 +20,6 @@ from loguru import logger
 
 from src.config import settings
 
-
-API_URL = "https://api.anthropic.com/v1/messages"
-MODEL = "claude-sonnet-4-6"
 
 _cache: Dict[str, str] = {}
 
@@ -40,6 +42,66 @@ _PROMPT_TEMPLATE = """Ты футбольный аналитик. На осно�
 Отвечай ОДНИМ абзацем, без эмодзи и markdown."""
 
 
+def _resolve_provider() -> tuple[str, str, str, str]:
+    """Returns (mode, url, api_key, model). mode is 'openai' or 'anthropic'."""
+    model = settings.llm_model or "claude-sonnet-4-6"
+    if settings.llm_base_url:
+        base = settings.llm_base_url.rstrip("/")
+        if not base.endswith("/v1") and "/v1/" not in base:
+            base = base + "/v1"
+        url = base + "/chat/completions"
+        key = settings.llm_api_key or settings.anthropic_api_key
+        return "openai", url, key, model
+    return "anthropic", "https://api.anthropic.com/v1/messages", settings.anthropic_api_key, model
+
+
+async def _call_openai(url: str, key: str, model: str, prompt: str) -> Optional[str]:
+    body = {
+        "model": model,
+        "max_tokens": 350,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+    async with aiohttp.ClientSession() as s:
+        async with s.post(url, json=body, headers=headers, timeout=30) as r:
+            if r.status != 200:
+                text = await r.text()
+                logger.warning(f"LLM OpenAI-proxy {r.status} ({model}): {text[:300]}")
+                return None
+            data = await r.json()
+    try:
+        return (data["choices"][0]["message"]["content"] or "").strip()
+    except (KeyError, IndexError, TypeError) as e:
+        logger.warning(f"LLM OpenAI-proxy unexpected response shape: {e}; data={str(data)[:300]}")
+        return None
+
+
+async def _call_anthropic(url: str, key: str, model: str, prompt: str) -> Optional[str]:
+    body = {
+        "model": model,
+        "max_tokens": 350,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    headers = {
+        "x-api-key": key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    async with aiohttp.ClientSession() as s:
+        async with s.post(url, json=body, headers=headers, timeout=30) as r:
+            if r.status != 200:
+                text = await r.text()
+                logger.warning(f"Anthropic API {r.status} ({model}): {text[:300]}")
+                return None
+            data = await r.json()
+    return "".join(
+        block.get("text", "") for block in data.get("content", []) if block.get("type") == "text"
+    ).strip()
+
+
 async def generate_commentary(
     *,
     match_id: int,
@@ -53,12 +115,15 @@ async def generate_commentary(
     edge: float,
     features: dict,
 ) -> Optional[str]:
-    if not settings.anthropic_api_key:
-        logger.info("Claude commentary skipped: ANTHROPIC_API_KEY not set")
+    mode, url, key, model = _resolve_provider()
+    if not key:
+        logger.info("LLM commentary skipped: no API key set (LLM_API_KEY / ANTHROPIC_API_KEY)")
         return None
+
     cache_key = f"{match_id}:{market}:{pick}"
     if cache_key in _cache:
         return _cache[cache_key]
+
     odds_block = (
         f"Кф букмекера: {book_odds:.2f}, edge модели: {edge*100:.1f}%"
         if book_odds and book_odds > 1.0
@@ -79,34 +144,22 @@ async def generate_commentary(
         h2h_wr=features.get("h2h_home_winrate", 0.5),
         h2h_g=features.get("h2h_avg_goals", 2.6),
     )
-    body = {
-        "model": MODEL,
-        "max_tokens": 350,
-        "messages": [{"role": "user", "content": prompt}],
-    }
-    headers = {
-        "x-api-key": settings.anthropic_api_key,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
+
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.post(API_URL, json=body, headers=headers, timeout=30) as r:
-                if r.status != 200:
-                    text = await r.text()
-                    logger.warning(f"Claude API {r.status} ({MODEL}): {text[:300]}")
-                    return None
-                data = await r.json()
-        text = "".join(
-            block.get("text", "") for block in data.get("content", []) if block.get("type") == "text"
-        ).strip()
-        if text:
-            _cache[cache_key] = text
-            logger.info(f"Claude commentary OK for match {match_id} ({len(text)} chars)")
-            return text
-        logger.warning(f"Claude returned empty text for match {match_id}")
+        if mode == "openai":
+            text = await _call_openai(url, key, model, prompt)
+        else:
+            text = await _call_anthropic(url, key, model, prompt)
     except asyncio.TimeoutError:
-        logger.warning("Claude API timeout")
+        logger.warning("LLM timeout")
+        return None
     except Exception as e:
-        logger.warning(f"Claude API failed: {e}")
+        logger.warning(f"LLM call failed: {e}")
+        return None
+
+    if text:
+        _cache[cache_key] = text
+        logger.info(f"LLM commentary OK ({mode}, {model}) match {match_id}: {len(text)} chars")
+        return text
+    logger.warning(f"LLM returned empty text for match {match_id}")
     return None

@@ -42,6 +42,15 @@ class Settings(BaseSettings):
     odds_api_key: str = ""
     anthropic_api_key: str = ""
 
+    # LLM provider config. By default we hit Anthropic directly.
+    # For OpenAI-compatible proxies (NeuroAPI, OpenRouter, etc.) set:
+    #   LLM_BASE_URL=https://neuroapi.host/v1
+    #   LLM_API_KEY=<proxy key>            (falls back to anthropic_api_key if empty)
+    #   LLM_MODEL=claude-sonnet-4-6        (whatever name the proxy uses)
+    llm_base_url: str = ""
+    llm_api_key: str = ""
+    llm_model: str = "claude-sonnet-4-6"
+
     database_url: str = "sqlite+aiosqlite:///./bot.db"
 
     min_edge: float = 0.05
