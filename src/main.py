@@ -10,7 +10,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from loguru import logger
 
-from src.bot.handlers import register
+from src.bot.handlers import broadcast_digest, register
 from src.config import settings
 from src.data.database import init_db
 from src.pipeline import (
@@ -73,6 +73,8 @@ async def main() -> None:
     scheduler.add_job(settle_pending, IntervalTrigger(minutes=30), id="settle")
     # Pull upcoming matches every 6 hours
     scheduler.add_job(refresh_upcoming, IntervalTrigger(hours=6), id="refresh_upcoming")
+    # Morning digest at 09:00 local time
+    scheduler.add_job(broadcast_digest, CronTrigger(hour=9, minute=0), args=[bot], id="digest")
     scheduler.start()
 
     await _on_startup(bot)

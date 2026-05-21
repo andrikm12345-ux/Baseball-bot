@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     football_data_api_key: str = ""
     api_football_key: str = ""
+    odds_api_key: str = ""
+    anthropic_api_key: str = ""
 
     database_url: str = "sqlite+aiosqlite:///./bot.db"
 

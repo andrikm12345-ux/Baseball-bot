@@ -15,7 +15,9 @@ _PICK_LABEL = {
 }
 
 
-def format_signal(sig: Signal, match: Match, home: Team, away: Team) -> str:
+def format_signal(
+    sig: Signal, match: Match, home: Team, away: Team, ai_comment: str | None = None
+) -> str:
     kickoff = match.utc_date.strftime("%d.%m %H:%M UTC")
     badge = "🎯 VALUE" if (sig.book_odds and sig.book_odds > 1.0) else "🤖 MODEL"
     lines = [
@@ -33,6 +35,8 @@ def format_signal(sig: Signal, match: Match, home: Team, away: Team) -> str:
             f"📈 Edge: <b>{sig.edge*100:.1f}%</b>",
             f"💵 Стейк: <b>{sig.stake_units:.2f}</b> ед.",
         ]
+    if ai_comment:
+        lines += ["", f"🧠 <i>{ai_comment}</i>"]
     return "\n".join(lines)
 
 
@@ -51,14 +55,17 @@ def format_roi(stats: RoiStats, title: str = "ROI") -> str:
 
 WELCOME = (
     "👋 <b>Привет!</b>\n\n"
-    "Я бот-аналитик футбольных матчей. Гоняю ML-модель на исторических матчах "
-    "топ-лиг и публикую сигналы там, где модель видит ценность.\n\n"
+    "Я бот-аналитик футбольных матчей. Гоняю ML-модель (XGBoost) на исторических "
+    "матчах топ-лиг, считаю edge против котировок букмекеров и публикую "
+    "value-сигналы.\n\n"
     "❗ Это <b>аналитика</b>, а не гарантия. Реальный ROI считается по факту "
     "сыгранных ставок и публикуется честно — без приукрашивания.\n\n"
     "<b>Команды:</b>\n"
     "/signals — сигналы на ближайшие матчи\n"
     "/today — матчи на сегодня\n"
     "/stats — статистика и ROI\n"
+    "/chart — график кумулятивной прибыли\n"
+    "/menu — открыть меню с кнопками\n"
     "/subscribe — получать сигналы автоматически\n"
     "/unsubscribe — отписаться\n"
     "/help — помощь"

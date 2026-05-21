@@ -8,6 +8,7 @@ import pandas as pd
 from loguru import logger
 from sqlalchemy import select
 
+from src.ai.commentary import generate_commentary
 from src.bot.formatters import format_signal
 from src.bot.handlers import broadcast_signal
 from src.config import settings
@@ -15,6 +16,7 @@ from src.data.database import Match, SessionLocal, Signal as SignalRow, Team
 from src.data.features import build_features, build_inference_features
 from src.data.football_api import FootballDataClient
 from src.data.ingest import ingest_history, ingest_upcoming
+from src.data.odds_api import OddsApiClient, fetch_odds_for_matches
 from src.ml.predict import Predictor
 from src.ml.train import train_all
 from src.signals.generator import Signal, generate
@@ -127,10 +129,37 @@ async def generate_and_broadcast(bot) -> int:
     if feats.empty:
         return 0
     preds = predictor.predict(feats)
+
+    # Attach bookmaker odds if we have an Odds API key
+    if settings.odds_api_key:
+        odds_client = OddsApiClient(settings.odds_api_key)
+        try:
+            async with SessionLocal() as session:
+                tuples = []
+                for mid in preds["match_id"].tolist():
+                    match = await session.get(Match, int(mid))
+                    if not match:
+                        continue
+                    home = await session.get(Team, match.home_team_id)
+                    away = await session.get(Team, match.away_team_id)
+                    if home and away:
+                        tuples.append((match.id, match.competition, home.name, away.name, match.utc_date))
+            odds_map = await fetch_odds_for_matches(odds_client, tuples)
+        finally:
+            await odds_client.close()
+        for col in [
+            "odds_home", "odds_draw", "odds_away",
+            "odds_over25", "odds_under25",
+            "odds_btts_yes", "odds_btts_no",
+        ]:
+            preds[col] = preds["match_id"].map(lambda m: (odds_map.get(int(m)) or {}).get(col, 0.0))
+        logger.info(f"Attached odds to {sum(1 for v in odds_map.values() if v)}/{len(preds)} matches")
+
     signals = generate(preds)
     new_rows = await _store_signals(signals)
     sent = 0
     if new_rows and bot:
+        feats_by_id = {int(r["match_id"]): r.to_dict() for _, r in feats.iterrows()}
         async with SessionLocal() as session:
             for row in new_rows:
                 match = await session.get(Match, row.match_id)
@@ -138,7 +167,16 @@ async def generate_and_broadcast(bot) -> int:
                     continue
                 home = await session.get(Team, match.home_team_id)
                 away = await session.get(Team, match.away_team_id)
-                text = format_signal(row, match, home, away)
+                ai_comment = await generate_commentary(
+                    match_id=row.match_id,
+                    home=home.name, away=away.name,
+                    competition=match.competition,
+                    market=row.market, pick=row.pick,
+                    prob=row.model_prob,
+                    book_odds=row.book_odds, edge=row.edge,
+                    features=feats_by_id.get(row.match_id, {}),
+                )
+                text = format_signal(row, match, home, away, ai_comment)
                 sent += await broadcast_signal(bot, text)
     logger.info(f"Generated {len(new_rows)} new signals, broadcast {sent} messages")
     return len(new_rows)
