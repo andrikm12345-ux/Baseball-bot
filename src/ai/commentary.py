@@ -54,6 +54,7 @@ async def generate_commentary(
     features: dict,
 ) -> Optional[str]:
     if not settings.anthropic_api_key:
+        logger.info("Claude commentary skipped: ANTHROPIC_API_KEY not set")
         return None
     cache_key = f"{match_id}:{market}:{pick}"
     if cache_key in _cache:
@@ -93,7 +94,7 @@ async def generate_commentary(
             async with s.post(API_URL, json=body, headers=headers, timeout=30) as r:
                 if r.status != 200:
                     text = await r.text()
-                    logger.warning(f"Claude API {r.status}: {text[:200]}")
+                    logger.warning(f"Claude API {r.status} ({MODEL}): {text[:300]}")
                     return None
                 data = await r.json()
         text = "".join(
@@ -101,7 +102,9 @@ async def generate_commentary(
         ).strip()
         if text:
             _cache[cache_key] = text
+            logger.info(f"Claude commentary OK for match {match_id} ({len(text)} chars)")
             return text
+        logger.warning(f"Claude returned empty text for match {match_id}")
     except asyncio.TimeoutError:
         logger.warning("Claude API timeout")
     except Exception as e:

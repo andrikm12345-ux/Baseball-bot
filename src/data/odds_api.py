@@ -78,6 +78,7 @@ class OddsApiClient:
         self._cache: Dict[str, Tuple[float, Any]] = {}
         self._cache_ttl = cache_ttl_seconds
         self._first_odds_logged = False
+        self._first_event_logged = False
 
     async def _session_get(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -132,7 +133,17 @@ class OddsApiClient:
         except Exception as e:
             logger.warning(f"fetch_events failed (sport={sport} league={league}): {e}")
             return []
-        return data if isinstance(data, list) else data.get("events", [])
+        events = data if isinstance(data, list) else data.get("events", [])
+        if events and not self._first_event_logged:
+            self._first_event_logged = True
+            try:
+                logger.info(
+                    f"odds-api.io sample event JSON (keys={list(events[0].keys())}): "
+                    f"{json.dumps(events[0])[:1500]}"
+                )
+            except Exception:
+                pass
+        return events
 
     async def fetch_event_odds(
         self,
@@ -381,6 +392,14 @@ async def fetch_odds_for_matches(
         return {}
 
     out: Dict[int, Dict[str, float]] = {}
+    # Log what teams we see in odds-api.io events for diagnosis
+    sample_teams = [
+        f"{_event_teams(ev)[0]!r} vs {_event_teams(ev)[1]!r}" for ev in events[:5]
+    ]
+    logger.info(f"odds-api.io sample teams: {sample_teams}")
+    sample_kickoffs = [_event_kickoff(ev) for ev in events[:3]]
+    logger.info(f"odds-api.io sample kickoffs: {sample_kickoffs}")
+
     for match_id, _comp, home, away, kickoff in upcoming:
         ev = _best_match(home, away, kickoff, events)
         if not ev:
