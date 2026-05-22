@@ -11,10 +11,14 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
+    Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+from loguru import logger
 
 from src.config import settings
 
@@ -77,6 +81,7 @@ class Signal(Base):
     settled: Mapped[bool] = mapped_column(Boolean, default=False)
     won: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     profit_units: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    commentary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     match = relationship("Match")
 
@@ -96,3 +101,7 @@ class Subscriber(Base):
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        try:
+            await conn.execute(text("ALTER TABLE signals ADD COLUMN IF NOT EXISTS commentary TEXT"))
+        except Exception as e:
+            logger.warning(f"commentary column migration skipped: {e}")

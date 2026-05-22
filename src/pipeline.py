@@ -176,6 +176,11 @@ async def generate_and_broadcast(bot) -> int:
                     book_odds=row.book_odds, edge=row.edge,
                     features=feats_by_id.get(row.match_id, {}),
                 )
+                if ai_comment:
+                    stored = await session.get(SignalRow, row.id)
+                    if stored:
+                        stored.commentary = ai_comment
+                        await session.commit()
                 text = format_signal(row, match, home, away, ai_comment)
                 sent += await broadcast_signal(bot, text)
     logger.info(f"Generated {len(new_rows)} new signals, broadcast {sent} messages")
