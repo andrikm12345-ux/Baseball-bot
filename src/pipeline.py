@@ -168,6 +168,7 @@ async def generate_and_broadcast(bot) -> int:
     signals = generate(preds)
     new_rows = await _store_signals(signals, ai_match_ids=ai_match_ids)
     sent = 0
+    ai_on = await get_bool("ai_ensemble_enabled", False)
     if new_rows and bot:
         feats_by_id = {int(r["match_id"]): r.to_dict() for _, r in feats.iterrows()}
         async with SessionLocal() as session:
@@ -177,23 +178,28 @@ async def generate_and_broadcast(bot) -> int:
                     continue
                 home = await session.get(Team, match.home_team_id)
                 away = await session.get(Team, match.away_team_id)
-                ai_comment = await generate_commentary(
-                    match_id=row.match_id,
-                    home=home.name, away=away.name,
-                    competition=match.competition,
-                    market=row.market, pick=row.pick,
-                    prob=row.model_prob,
-                    book_odds=row.book_odds, edge=row.edge,
-                    features=feats_by_id.get(row.match_id, {}),
-                )
-                if ai_comment:
-                    stored = await session.get(SignalRow, row.id)
-                    if stored:
-                        stored.commentary = ai_comment
-                        await session.commit()
+                ai_comment = None
+                if ai_on:
+                    ai_comment = await generate_commentary(
+                        match_id=row.match_id,
+                        home=home.name, away=away.name,
+                        competition=match.competition,
+                        market=row.market, pick=row.pick,
+                        prob=row.model_prob,
+                        book_odds=row.book_odds, edge=row.edge,
+                        features=feats_by_id.get(row.match_id, {}),
+                    )
+                    if ai_comment:
+                        stored = await session.get(SignalRow, row.id)
+                        if stored:
+                            stored.commentary = ai_comment
+                            await session.commit()
                 text = format_signal(row, match, home, away, ai_comment)
                 sent += await broadcast_signal(bot, text)
-    logger.info(f"Generated {len(new_rows)} new signals, broadcast {sent} messages")
+    logger.info(
+        f"Generated {len(new_rows)} new signals, broadcast {sent} messages "
+        f"(AI={'on' if ai_on else 'off'})"
+    )
     return len(new_rows)
 
 
