@@ -36,16 +36,18 @@ router = Router()
 @router.message(CommandStart())
 async def cmd_start(msg: Message) -> None:
     is_admin = msg.from_user and msg.from_user.id in settings.admin_ids
+    ai_on = await get_bool("ai_ensemble_enabled", False)
+    sub_active = await _is_subscribed(msg.chat.id)
     if is_admin:
         await msg.answer(
             "👋 Привет, админ! Управляй ботом через панель ниже.",
             parse_mode="HTML",
-            reply_markup=admin_menu(),
+            reply_markup=admin_menu(ai_on),
         )
-        await msg.answer(WELCOME, parse_mode="HTML", reply_markup=main_menu())
+        await msg.answer(WELCOME, parse_mode="HTML", reply_markup=main_menu(sub_active, ai_on))
         return
     if await is_allowed(msg.chat.id):
-        await msg.answer(WELCOME, parse_mode="HTML", reply_markup=main_menu())
+        await msg.answer(WELCOME, parse_mode="HTML", reply_markup=main_menu(sub_active, ai_on))
         return
     locked = (
         "🔒 Доступ ограничен.\n\n"
@@ -62,7 +64,9 @@ async def cmd_help(msg: Message) -> None:
 
 @router.message(Command("menu"))
 async def cmd_menu(msg: Message) -> None:
-    await msg.answer("Меню:", reply_markup=main_menu())
+    sub_active = await _is_subscribed(msg.chat.id)
+    ai_on = await get_bool("ai_ensemble_enabled", False)
+    await msg.answer("Меню:", reply_markup=main_menu(sub_active, ai_on))
 
 
 @router.message(Command("subscribe"))
@@ -249,7 +253,7 @@ async def btn_today(msg: Message) -> None:
     await _send_today(msg)
 
 
-@router.message(F.text == "🧠 AI ансамбль")
+@router.message(F.text.regexp(r"^🧠 AI"))
 async def btn_ai_toggle(msg: Message) -> None:
     if not _is_admin(msg):
         return
@@ -266,13 +270,18 @@ async def btn_ai_toggle(msg: Message) -> None:
     await msg.answer(
         f"AI-ансамбль: <b>{status}</b>\n\n{detail}",
         parse_mode="HTML",
+        reply_markup=admin_menu(new),
     )
 
 
 @router.message(Command("cancel"))
 async def cmd_cancel(msg: Message, state: FSMContext) -> None:
     await state.clear()
-    await msg.answer("Отменено.", reply_markup=admin_menu() if _is_admin(msg) else ReplyKeyboardRemove())
+    if _is_admin(msg):
+        ai_on = await get_bool("ai_ensemble_enabled", False)
+        await msg.answer("Отменено.", reply_markup=admin_menu(ai_on))
+    else:
+        await msg.answer("Отменено.", reply_markup=ReplyKeyboardRemove())
 
 
 @router.message(AdminFSM.waiting_add)
@@ -299,13 +308,13 @@ async def fsm_add_user(msg: Message, state: FSMContext) -> None:
         logger.warning(f"notify failed for {chat_id}: {e}")
         notified = False
     if notified:
-        await msg.answer(f"✅ <code>{chat_id}</code> добавлен и уведомлён.", parse_mode="HTML", reply_markup=admin_menu())
+        await msg.answer(f"✅ <code>{chat_id}</code> добавлен и уведомлён.", parse_mode="HTML", reply_markup=admin_menu(await get_bool("ai_ensemble_enabled", False)))
     else:
         await msg.answer(
             f"✅ <code>{chat_id}</code> добавлен. Уведомить не получилось — "
             "пусть сам напишет /start боту.",
             parse_mode="HTML",
-            reply_markup=admin_menu(),
+            reply_markup=admin_menu(await get_bool("ai_ensemble_enabled", False)),
         )
 
 
@@ -318,7 +327,7 @@ async def fsm_remove_user(msg: Message, state: FSMContext) -> None:
     chat_id = int(text)
     await state.clear()
     await _unsubscribe(chat_id)
-    await msg.answer(f"🚫 <code>{chat_id}</code> удалён.", parse_mode="HTML", reply_markup=admin_menu())
+    await msg.answer(f"🚫 <code>{chat_id}</code> удалён.", parse_mode="HTML", reply_markup=admin_menu(await get_bool("ai_ensemble_enabled", False)))
 
 
 # ─────────────────────────── CALLBACKS ───────────────────────────
@@ -338,14 +347,25 @@ async def cb_menu(q: CallbackQuery) -> None:
         await _send_chart(q.message)
     elif action == "subscribe":
         await _subscribe(q.message.chat.id, q.from_user.username)
-        await q.message.answer("✅ Подписка активна.")
+        ai_on = await get_bool("ai_ensemble_enabled", False)
+        await q.message.answer("✅ Подписка активна.", reply_markup=main_menu(True, ai_on))
     elif action == "unsubscribe":
         await _unsubscribe(q.message.chat.id)
-        await q.message.answer("👋 Отписан.")
+        ai_on = await get_bool("ai_ensemble_enabled", False)
+        await q.message.answer("👋 Отписан.", reply_markup=main_menu(False, ai_on))
+    elif action == "ai_info":
+        ai_on = await get_bool("ai_ensemble_enabled", False)
+        status = "🟢 ВКЛ" if ai_on else "🔴 ВЫКЛ"
+        await q.message.answer(
+            f"🧠 AI-ансамбль управляется админом.\nТекущий статус: <b>{status}</b>",
+            parse_mode="HTML",
+        )
     elif action == "filters":
         await q.message.answer("Выбери фильтр:", reply_markup=filters_menu())
     elif action == "back":
-        await q.message.answer("Меню:", reply_markup=main_menu())
+        sub_active = await _is_subscribed(q.message.chat.id)
+        ai_on = await get_bool("ai_ensemble_enabled", False)
+        await q.message.answer("Меню:", reply_markup=main_menu(sub_active, ai_on))
 
 
 @router.callback_query(F.data.startswith("filter:"))
@@ -362,6 +382,12 @@ async def cb_filter(q: CallbackQuery) -> None:
 
 
 # ─────────────────────────── HELPERS ───────────────────────────
+
+
+async def _is_subscribed(chat_id: int) -> bool:
+    async with SessionLocal() as session:
+        sub = await session.get(Subscriber, chat_id)
+    return bool(sub and sub.active)
 
 
 async def _subscribe(chat_id: int, username: Optional[str]) -> None:

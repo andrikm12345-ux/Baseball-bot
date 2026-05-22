@@ -8,7 +8,10 @@ from aiogram.types import (
 )
 
 
-def main_menu() -> InlineKeyboardMarkup:
+def main_menu(subscribed: bool = False, ai_enabled: bool = False) -> InlineKeyboardMarkup:
+    sub_text = "🔔 Подписка: АКТИВНА" if subscribed else "🔕 Подписаться"
+    sub_data = "menu:unsubscribe" if subscribed else "menu:subscribe"
+    ai_dot = "🟢" if ai_enabled else "🔴"
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="🎯 Сигналы", callback_data="menu:signals"),
@@ -19,20 +22,21 @@ def main_menu() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📊 График", callback_data="menu:chart"),
         ],
         [
-            InlineKeyboardButton(text="🔔 Подписаться", callback_data="menu:subscribe"),
-            InlineKeyboardButton(text="🔕 Отписаться", callback_data="menu:unsubscribe"),
+            InlineKeyboardButton(text=sub_text, callback_data=sub_data),
+            InlineKeyboardButton(text=f"🧠 AI: {ai_dot}", callback_data="menu:ai_info"),
         ],
         [InlineKeyboardButton(text="🔧 Фильтры", callback_data="menu:filters")],
     ])
 
 
-def admin_menu() -> ReplyKeyboardMarkup:
+def admin_menu(ai_enabled: bool = False) -> ReplyKeyboardMarkup:
+    ai_label = "🧠 AI: 🟢 ВКЛ" if ai_enabled else "🧠 AI: 🔴 ВЫКЛ"
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="👥 Подписчики"), KeyboardButton(text="➕ Добавить")],
             [KeyboardButton(text="🚫 Удалить"),    KeyboardButton(text="📊 Статистика")],
             [KeyboardButton(text="🎯 Сигналы"),    KeyboardButton(text="📅 Сегодня")],
-            [KeyboardButton(text="🧠 AI ансамбль")],
+            [KeyboardButton(text=ai_label)],
         ],
         resize_keyboard=True,
         persistent=True,
