@@ -36,7 +36,7 @@ def admin_menu(ai_enabled: bool = False) -> ReplyKeyboardMarkup:
             [KeyboardButton(text="👥 Подписчики"), KeyboardButton(text="➕ Добавить")],
             [KeyboardButton(text="🚫 Удалить"),    KeyboardButton(text="📊 Статистика")],
             [KeyboardButton(text="🎯 Сигналы"),    KeyboardButton(text="📅 Сегодня")],
-            [KeyboardButton(text=ai_label)],
+            [KeyboardButton(text="📥 Лиды"),       KeyboardButton(text=ai_label)],
         ],
         resize_keyboard=True,
         persistent=True,

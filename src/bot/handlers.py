@@ -9,7 +9,14 @@ from aiogram.exceptions import TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import BufferedInputFile, CallbackQuery, Message, ReplyKeyboardRemove
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    ReplyKeyboardRemove,
+)
 from loguru import logger
 from sqlalchemy import and_, select
 
@@ -17,7 +24,7 @@ from src.bot.access import is_allowed
 from src.bot.formatters import HELP, WELCOME, format_roi, format_signal, format_signal_short, format_stats_table
 from src.bot.keyboards import admin_menu, filters_menu, main_menu
 from src.config import settings
-from src.data.database import Match, SessionLocal, Signal, Subscriber, Team
+from src.data.database import Match, PendingUser, SessionLocal, Signal, Subscriber, Team
 from src.data.settings_store import get_bool, set_bool
 from src.signals.tracker import roi_stats
 
@@ -55,6 +62,31 @@ async def cmd_start(msg: Message) -> None:
         "Перешли этот номер админу — он откроет тебе доступ."
     )
     await msg.answer(locked, parse_mode="HTML")
+    await _track_pending(msg)
+
+
+async def _track_pending(msg: Message) -> None:
+    u = msg.from_user
+    try:
+        async with SessionLocal() as session:
+            p = await session.get(PendingUser, msg.chat.id)
+            if p is None:
+                session.add(PendingUser(
+                    chat_id=msg.chat.id,
+                    username=(u.username if u else None),
+                    first_name=(u.first_name if u else None),
+                    last_name=(u.last_name if u else None),
+                    start_count=1,
+                ))
+            else:
+                p.start_count += 1
+                if u:
+                    p.username = u.username or p.username
+                    p.first_name = u.first_name or p.first_name
+                    p.last_name = u.last_name or p.last_name
+            await session.commit()
+    except Exception as e:
+        logger.warning(f"_track_pending failed for {msg.chat.id}: {e}")
 
 
 @router.message(Command("help"))
@@ -135,6 +167,9 @@ async def cmd_allow(msg: Message) -> None:
             sub.active = True
             if username:
                 sub.username = username
+        pend = await session.get(PendingUser, chat_id)
+        if pend:
+            await session.delete(pend)
         await session.commit()
     notified = True
     try:
@@ -199,6 +234,26 @@ def _is_admin(msg: Message) -> bool:
     return bool(msg.from_user and msg.from_user.id in settings.admin_ids)
 
 
+def _humanize_delta(d: timedelta) -> str:
+    s = int(d.total_seconds())
+    if s < 60:
+        return "только что"
+    if s < 3600:
+        return f"{s // 60} мин назад"
+    if s < 86400:
+        return f"{s // 3600} ч назад"
+    return f"{s // 86400} дн назад"
+
+
+def _format_user_label(p: PendingUser) -> str:
+    if p.username:
+        return f"<b>@{p.username}</b>"
+    full = " ".join(filter(None, [p.first_name, p.last_name])).strip()
+    if full:
+        return f"<b>{full}</b>"
+    return "<b>(без имени)</b>"
+
+
 @router.message(F.text == "👥 Подписчики")
 async def btn_subscribers(msg: Message) -> None:
     if not _is_admin(msg):
@@ -253,6 +308,73 @@ async def btn_today(msg: Message) -> None:
     await _send_today(msg)
 
 
+@router.message(F.text == "📥 Лиды")
+async def btn_leads(msg: Message) -> None:
+    if not _is_admin(msg):
+        return
+    async with SessionLocal() as session:
+        rows = (await session.execute(
+            select(PendingUser).order_by(PendingUser.last_seen_at.desc()).limit(30)
+        )).scalars().all()
+    if not rows:
+        await msg.answer("📭 Лидов нет — никто не нажимал /start без одобрения.")
+        return
+    lines = [f"<b>📥 Лиды ({len(rows)}):</b>", ""]
+    for p in rows:
+        label = _format_user_label(p)
+        ago = _humanize_delta(datetime.utcnow() - p.last_seen_at)
+        lines.append(
+            f"{label}\n"
+            f"  <code>{p.chat_id}</code>  ·  стартов: {p.start_count}  ·  {ago}"
+        )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"✅ Одобрить {p.chat_id}",
+            callback_data=f"approve:{p.chat_id}",
+        )] for p in rows[:10]
+    ])
+    await msg.answer("\n".join(lines), parse_mode="HTML", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("approve:"))
+async def cb_approve(q: CallbackQuery) -> None:
+    if not q.from_user or q.from_user.id not in settings.admin_ids:
+        await q.answer("Только админ", show_alert=True)
+        return
+    try:
+        chat_id = int(q.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        await q.answer("Битый callback", show_alert=True)
+        return
+    async with SessionLocal() as session:
+        pend = await session.get(PendingUser, chat_id)
+        username = pend.username if pend else None
+        sub = await session.get(Subscriber, chat_id)
+        if sub is None:
+            session.add(Subscriber(chat_id=chat_id, username=username, active=True))
+        else:
+            sub.active = True
+            if username:
+                sub.username = username
+        if pend:
+            await session.delete(pend)
+        await session.commit()
+    try:
+        await q.bot.send_message(chat_id, "✅ Доступ открыт! Напиши /start.")
+    except TelegramForbiddenError:
+        pass
+    except Exception as e:
+        logger.warning(f"cb_approve notify failed for {chat_id}: {e}")
+    await q.answer(f"✅ {chat_id} одобрен")
+    try:
+        await q.message.edit_text(
+            (q.message.html_text or q.message.text or "") + f"\n\n<i>✅ {chat_id} одобрен.</i>",
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+
 @router.message(F.text.regexp(r"^🧠 AI"))
 async def btn_ai_toggle(msg: Message) -> None:
     if not _is_admin(msg):
@@ -298,6 +420,9 @@ async def fsm_add_user(msg: Message, state: FSMContext) -> None:
             session.add(Subscriber(chat_id=chat_id, active=True))
         else:
             sub.active = True
+        pend = await session.get(PendingUser, chat_id)
+        if pend:
+            await session.delete(pend)
         await session.commit()
     notified = True
     try:

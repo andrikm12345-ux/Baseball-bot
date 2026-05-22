@@ -108,6 +108,19 @@ class Setting(Base):
     )
 
 
+class PendingUser(Base):
+    __tablename__ = "pending_users"
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    username: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    first_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    last_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+    start_count: Mapped[int] = mapped_column(Integer, default=1)
+
+
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
