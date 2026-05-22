@@ -67,7 +67,7 @@ async def refresh_upcoming(days: int = 7) -> int:
         await client.close()
 
 
-async def train_models() -> None:
+async def train_models(bot=None) -> None:
     df = await _load_matches_df()
     if df.empty:
         logger.warning("No matches in DB — skip training")
@@ -77,8 +77,20 @@ async def train_models() -> None:
         logger.warning(f"Only {len(finished)} finished matches — not training yet")
         return
     features = build_features(finished)
-    paths = train_all(features)
-    logger.info(f"Models saved: {paths}")
+    result = train_all(features)
+    logger.info(f"Models saved: {result['paths']}")
+    if bot:
+        await _notify_admins_training(bot, result["metrics"])
+
+
+async def _notify_admins_training(bot, metrics: dict) -> None:
+    from src.bot.formatters import format_training_report
+    text = format_training_report(metrics)
+    for admin_id in settings.admin_ids:
+        try:
+            await bot.send_message(admin_id, text, parse_mode="HTML")
+        except Exception as e:
+            logger.warning(f"train notify to {admin_id} failed: {e}")
 
 
 async def _store_signals(
@@ -217,8 +229,13 @@ async def _apply_ai_ensemble(
 
     feats_by_id = {int(r["match_id"]): r.to_dict() for _, r in feats.iterrows()}
     preds = preds.copy()
+    threshold = settings.ai_ensemble_min_prob
     preds["_max_1x2"] = preds[["p_home", "p_draw", "p_away"]].max(axis=1)
-    candidates = preds.sort_values("_max_1x2", ascending=False).head(top_n)
+    candidates = (
+        preds[preds["_max_1x2"] >= threshold]
+        .sort_values("_max_1x2", ascending=False)
+        .head(top_n)
+    )
     preds.drop(columns=["_max_1x2"], inplace=True)
 
     if candidates.empty:
@@ -288,6 +305,6 @@ async def daily_cycle(bot) -> None:
     logger.info("Daily cycle start")
     await refresh_upcoming(days=7)
     await settle_pending()
-    await train_models()
+    await train_models(bot=bot)
     await generate_and_broadcast(bot)
     logger.info("Daily cycle done")

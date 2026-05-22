@@ -1,8 +1,9 @@
 """Train three calibrated XGBoost models: 1X2, Over/Under 2.5, BTTS."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Any, Dict, Tuple
 
 import joblib
 import numpy as np
@@ -48,7 +49,7 @@ def _train_one(X: pd.DataFrame, y: np.ndarray, multiclass: bool, name: str) -> C
     return cal
 
 
-def train_all(features_df: pd.DataFrame) -> Dict[str, Path]:
+def train_all(features_df: pd.DataFrame) -> Dict[str, Any]:
     if features_df.empty or len(features_df) < 200:
         raise RuntimeError(
             f"Not enough training data ({len(features_df)} rows). "
@@ -56,28 +57,73 @@ def train_all(features_df: pd.DataFrame) -> Dict[str, Path]:
         )
     features_df = features_df.dropna(subset=["outcome", "over25", "btts"]).reset_index(drop=True)
     X = features_df[FEATURE_COLUMNS].astype(float)
+    y_1x2 = features_df["outcome"].astype(int).values
+    y_ou = features_df["over25"].astype(int).values
+    y_btts = features_df["btts"].astype(int).values
 
     paths: Dict[str, Path] = {}
 
     logger.info(f"Training 1X2 on {len(X)} rows")
-    m_1x2 = _train_one(X, features_df["outcome"].astype(int).values, multiclass=True, name="1X2")
+    m_1x2 = _train_one(X, y_1x2, multiclass=True, name="1X2")
     p = MODELS_DIR / "model_1x2.joblib"
     joblib.dump({"model": m_1x2, "features": FEATURE_COLUMNS}, p)
     paths["1X2"] = p
 
     logger.info(f"Training OU2.5 on {len(X)} rows")
-    m_ou = _train_one(X, features_df["over25"].astype(int).values, multiclass=False, name="OU2.5")
+    m_ou = _train_one(X, y_ou, multiclass=False, name="OU2.5")
     p = MODELS_DIR / "model_ou25.joblib"
     joblib.dump({"model": m_ou, "features": FEATURE_COLUMNS}, p)
     paths["OU25"] = p
 
     logger.info(f"Training BTTS on {len(X)} rows")
-    m_btts = _train_one(X, features_df["btts"].astype(int).values, multiclass=False, name="BTTS")
+    m_btts = _train_one(X, y_btts, multiclass=False, name="BTTS")
     p = MODELS_DIR / "model_btts.joblib"
     joblib.dump({"model": m_btts, "features": FEATURE_COLUMNS}, p)
     paths["BTTS"] = p
 
-    return paths
+    metrics_inn = {
+        "n_train": len(X),
+        "1x2_logloss": float(log_loss(y_1x2, m_1x2.predict_proba(X), labels=[0, 1, 2])),
+        "ou_brier": float(brier_score_loss(y_ou, m_ou.predict_proba(X)[:, 1])),
+        "btts_brier": float(brier_score_loss(y_btts, m_btts.predict_proba(X)[:, 1])),
+    }
+    walk = evaluate_walk_forward(features_df)
+
+    top_features: list[str] = []
+    try:
+        base = m_1x2.calibrated_classifiers_[0].estimator
+        imp = sorted(
+            zip(FEATURE_COLUMNS, base.feature_importances_),
+            key=lambda x: -x[1],
+        )[:5]
+        top_features = [f"{name} ({score:.2f})" for name, score in imp]
+    except Exception as e:
+        logger.warning(f"feature_importance extract failed: {e}")
+
+    last_path = MODELS_DIR / "_last_metrics.json"
+    prev: Dict[str, float] = {}
+    if last_path.exists():
+        try:
+            prev = json.loads(last_path.read_text())
+        except Exception:
+            prev = {}
+    diff = {
+        "1x2_logloss": metrics_inn["1x2_logloss"] - prev.get("1x2_logloss", metrics_inn["1x2_logloss"]),
+        "ou_brier": metrics_inn["ou_brier"] - prev.get("ou_brier", metrics_inn["ou_brier"]),
+        "btts_brier": metrics_inn["btts_brier"] - prev.get("btts_brier", metrics_inn["btts_brier"]),
+    }
+    try:
+        last_path.write_text(json.dumps(metrics_inn, indent=2))
+    except Exception as e:
+        logger.warning(f"could not save _last_metrics.json: {e}")
+
+    metrics = {
+        **metrics_inn,
+        "walk_forward": walk,
+        "top_features": top_features,
+        "diff_vs_prev": diff,
+    }
+    return {"paths": paths, "metrics": metrics}
 
 
 def evaluate_walk_forward(features_df: pd.DataFrame) -> Dict[str, float]:

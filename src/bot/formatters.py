@@ -59,6 +59,43 @@ def format_signal_short(sigs: list[Signal]) -> str:
     return f"🤖 {market} {pick} · уверенность {best.confidence*100:.0f}%{ai_tag}"
 
 
+def format_training_report(m: dict) -> str:
+    def _arrow(d: float) -> str:
+        if abs(d) < 0.001:
+            return "≈"
+        return "↓" if d < 0 else "↑"
+
+    diff = m.get("diff_vs_prev", {})
+    walk = m.get("walk_forward", {})
+    lines = [
+        "🎓 <b>МОДЕЛЬ ПЕРЕОБУЧЕНА</b>",
+        "━━━━━━━━━━━━━━━━━━━━━",
+        f"Матчей в выборке: <b>{m['n_train']}</b>",
+        "",
+        "<b>Качество (in-sample):</b>",
+        f"• 1X2 logloss: <b>{m['1x2_logloss']:.4f}</b> "
+        f"{_arrow(diff.get('1x2_logloss', 0))} {abs(diff.get('1x2_logloss', 0)):.4f}",
+        f"• OU2.5 Brier: <b>{m['ou_brier']:.4f}</b> "
+        f"{_arrow(diff.get('ou_brier', 0))} {abs(diff.get('ou_brier', 0)):.4f}",
+        f"• BTTS Brier: <b>{m['btts_brier']:.4f}</b> "
+        f"{_arrow(diff.get('btts_brier', 0))} {abs(diff.get('btts_brier', 0)):.4f}",
+    ]
+    if walk:
+        lines += [
+            "",
+            "<b>Честная проверка (walk-forward CV):</b>",
+            f"• 1X2: <b>{walk.get('1x2_logloss', 0):.4f}</b>",
+            f"• OU2.5: <b>{walk.get('ou_brier', 0):.4f}</b>",
+            f"• BTTS: <b>{walk.get('btts_brier', 0):.4f}</b>",
+        ]
+    if m.get("top_features"):
+        lines += ["", "<b>Главные фичи (важность):</b>"]
+        for f in m["top_features"]:
+            lines.append(f"  • {f}")
+    lines.append("\n<i>Низкие logloss/Brier = лучше. Стрелки — изменение от прошлого обучения.</i>")
+    return "\n".join(lines)
+
+
 def format_stats_table(
     model_s: RoiStats,
     value_s: RoiStats,

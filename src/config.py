@@ -45,6 +45,7 @@ class Settings(BaseSettings):
 
     ai_ensemble_weight: float = 0.3
     ai_ensemble_top_n: int = 10
+    ai_ensemble_min_prob: float = 0.45
 
     # LLM provider config. By default we hit Anthropic directly.
     # For OpenAI-compatible proxies (NeuroAPI, OpenRouter, etc.) set:

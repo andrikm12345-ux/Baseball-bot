@@ -48,7 +48,7 @@ async def _first_boot_warmup(bot: Bot) -> None:
             logger.info(
                 f"Training models (cold_start={cold_start}, stale={predictor_stale})"
             )
-            await train_models()
+            await train_models(bot=bot)
             await refresh_upcoming(days=7)
             await generate_and_broadcast(bot)
     except Exception as e:
