@@ -92,7 +92,12 @@ async def main() -> None:
 
     logger.info("Bot polling started")
     try:
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        await bot.delete_webhook(drop_pending_updates=True)
+        await dp.start_polling(
+            bot,
+            allowed_updates=dp.resolve_used_update_types(),
+            polling_timeout=10,
+        )
     finally:
         scheduler.shutdown(wait=False)
         await bot.session.close()
