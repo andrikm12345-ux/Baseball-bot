@@ -20,6 +20,8 @@ def format_signal(
 ) -> str:
     kickoff = match.utc_date.strftime("%d.%m %H:%M UTC")
     badge = "🎯 VALUE" if (sig.book_odds and sig.book_odds > 1.0) else "🤖 MODEL"
+    if getattr(sig, "is_ai_ensemble", False):
+        badge += " · 🧠 AI"
     lines = [
         f"<b>{badge}</b>  <i>{match.competition}</i>",
         f"⚽ <b>{home.name}</b> — <b>{away.name}</b>",
@@ -48,11 +50,13 @@ def format_signal_short(sigs: list[Signal]) -> str:
         best = max(value_sigs, key=lambda s: s.edge)
         market = _MARKET_LABEL.get(best.market, best.market)
         pick = _PICK_LABEL.get(best.pick, best.pick)
-        return f"🎯 {market} {pick} · edge {best.edge*100:.0f}% · кф {best.book_odds:.2f}"
+        ai_tag = " · 🧠" if getattr(best, "is_ai_ensemble", False) else ""
+        return f"🎯 {market} {pick} · edge {best.edge*100:.0f}% · кф {best.book_odds:.2f}{ai_tag}"
     best = max(sigs, key=lambda s: s.confidence)
     market = _MARKET_LABEL.get(best.market, best.market)
     pick = _PICK_LABEL.get(best.pick, best.pick)
-    return f"🤖 {market} {pick} · уверенность {best.confidence*100:.0f}%"
+    ai_tag = " · 🧠" if getattr(best, "is_ai_ensemble", False) else ""
+    return f"🤖 {market} {pick} · уверенность {best.confidence*100:.0f}%{ai_tag}"
 
 
 def format_stats_table(
