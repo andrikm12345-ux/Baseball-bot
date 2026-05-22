@@ -10,7 +10,7 @@ from src.signals.tracker import RoiStats
 _MARKET_LABEL = {"1X2": "Исход", "OU25": "Тотал 2.5", "BTTS": "Обе забьют"}
 _PICK_LABEL = {
     "HOME": "П1", "DRAW": "X", "AWAY": "П2",
-    "OVER": "Б 2.5", "UNDER": "М 2.5",
+    "OVER": "Б", "UNDER": "М",
     "YES": "Да", "NO": "Нет",
 }
 
