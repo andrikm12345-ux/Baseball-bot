@@ -32,9 +32,9 @@
    - `TELEGRAM_BOT_TOKEN`
    - `FOOTBALL_DATA_API_KEY`
    - `ADMIN_IDS` (твой Telegram user id)
-   - (опционально) `COMPETITIONS=PL,PD,SA,BL1,FL1,CL`
+   - (опционально) `COMPETITIONS=PL,PD,SA,BL1,FL1,CL,DED,PPL,ELC,BSA,CLI`
 5. Добавь Postgres плагин: Railway автоматически подкинет `DATABASE_URL`.
-6. Жми Deploy. На первом запуске бот сам подтянет историю и обучит модель (~5–10 минут на free tier из-за лимита 10 req/min).
+6. Жми Deploy. На первом запуске бот сам подтянет историю и обучит модель (~15–25 минут на free tier из-за лимита 10 req/min).
 
 ## Локальный запуск
 
@@ -73,7 +73,7 @@ src/
 | `MIN_EDGE` | 0.05 | Минимальный edge для value-сигнала |
 | `MIN_CONFIDENCE` | 0.55 | Минимальная вероятность модели |
 | `MIN_ODDS` / `MAX_ODDS` | 1.5 / 4.5 | Диапазон коэффициентов |
-| `COMPETITIONS` | PL,PD,SA,BL1,FL1,CL | Какие турниры тянуть |
+| `COMPETITIONS` | PL,PD,SA,BL1,FL1,CL,DED,PPL,ELC,BSA,CLI | Какие турниры тянуть (free tier football-data.org) |
 
 ## Что улучшить дальше
 

@@ -73,7 +73,7 @@ class Settings(BaseSettings):
     def competitions(self) -> List[str]:
         return _split_upper(
             os.getenv("COMPETITIONS", ""),
-            default=["PL", "PD", "SA", "BL1", "FL1", "CL"],
+            default=["PL", "PD", "SA", "BL1", "FL1", "CL", "DED", "PPL", "ELC", "BSA", "CLI"],
         )
 
 
