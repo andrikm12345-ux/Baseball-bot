@@ -7,16 +7,23 @@ from typing import Optional
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.exceptions import TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
-from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import BufferedInputFile, CallbackQuery, Message, ReplyKeyboardRemove
 from loguru import logger
 from sqlalchemy import and_, select
 
 from src.bot.access import is_allowed
 from src.bot.formatters import HELP, WELCOME, format_roi, format_signal
-from src.bot.keyboards import filters_menu, main_menu
+from src.bot.keyboards import admin_menu, filters_menu, main_menu
 from src.config import settings
 from src.data.database import Match, SessionLocal, Signal, Subscriber, Team
 from src.signals.tracker import roi_stats
+
+
+class AdminFSM(StatesGroup):
+    waiting_add = State()
+    waiting_remove = State()
 
 
 router = Router()
@@ -27,6 +34,15 @@ router = Router()
 
 @router.message(CommandStart())
 async def cmd_start(msg: Message) -> None:
+    is_admin = msg.from_user and msg.from_user.id in settings.admin_ids
+    if is_admin:
+        await msg.answer(
+            "👋 Привет, админ! Управляй ботом через панель ниже.",
+            parse_mode="HTML",
+            reply_markup=admin_menu(),
+        )
+        await msg.answer(WELCOME, parse_mode="HTML", reply_markup=main_menu())
+        return
     if await is_allowed(msg.chat.id):
         await msg.answer(WELCOME, parse_mode="HTML", reply_markup=main_menu())
         return
@@ -150,6 +166,10 @@ async def cmd_deny(msg: Message) -> None:
 async def cmd_allowed(msg: Message) -> None:
     if not msg.from_user or msg.from_user.id not in settings.admin_ids:
         return
+    await _send_subscribers(msg)
+
+
+async def _send_subscribers(msg: Message) -> None:
     async with SessionLocal() as session:
         rows = (await session.execute(
             select(Subscriber).where(Subscriber.active.is_(True))
@@ -165,6 +185,119 @@ async def cmd_allowed(msg: Message) -> None:
         date = s.subscribed_at.strftime("%Y-%m-%d")
         lines.append(f"<code>{s.chat_id}</code>  {uname}  {date}")
     await msg.answer("\n".join(lines), parse_mode="HTML")
+
+
+# ─────────────────────────── ADMIN PANEL BUTTONS ───────────────────────────
+
+
+def _is_admin(msg: Message) -> bool:
+    return bool(msg.from_user and msg.from_user.id in settings.admin_ids)
+
+
+@router.message(F.text == "👥 Подписчики")
+async def btn_subscribers(msg: Message) -> None:
+    if not _is_admin(msg):
+        return
+    await _send_subscribers(msg)
+
+
+@router.message(F.text == "➕ Добавить")
+async def btn_add(msg: Message, state: FSMContext) -> None:
+    if not _is_admin(msg):
+        return
+    await state.set_state(AdminFSM.waiting_add)
+    await msg.answer(
+        "Введи <b>chat_id</b> пользователя, которому хочешь открыть доступ.\n\n"
+        "Пример: <code>123456789</code>\n\n"
+        "Или /cancel для отмены.",
+        parse_mode="HTML",
+    )
+
+
+@router.message(F.text == "🚫 Удалить")
+async def btn_remove(msg: Message, state: FSMContext) -> None:
+    if not _is_admin(msg):
+        return
+    await state.set_state(AdminFSM.waiting_remove)
+    await msg.answer(
+        "Введи <b>chat_id</b> пользователя, которому хочешь закрыть доступ.\n\n"
+        "Пример: <code>123456789</code>\n\n"
+        "Или /cancel для отмены.",
+        parse_mode="HTML",
+    )
+
+
+@router.message(F.text == "📊 Статистика")
+async def btn_stats(msg: Message) -> None:
+    if not _is_admin(msg):
+        return
+    await _send_stats(msg)
+
+
+@router.message(F.text == "🎯 Сигналы")
+async def btn_signals(msg: Message) -> None:
+    if not _is_admin(msg):
+        return
+    await _send_signals(msg, league=None, market=None, only_value=False)
+
+
+@router.message(F.text == "📅 Сегодня")
+async def btn_today(msg: Message) -> None:
+    if not _is_admin(msg):
+        return
+    await _send_today(msg)
+
+
+@router.message(Command("cancel"))
+async def cmd_cancel(msg: Message, state: FSMContext) -> None:
+    await state.clear()
+    await msg.answer("Отменено.", reply_markup=admin_menu() if _is_admin(msg) else ReplyKeyboardRemove())
+
+
+@router.message(AdminFSM.waiting_add)
+async def fsm_add_user(msg: Message, state: FSMContext) -> None:
+    text = (msg.text or "").strip()
+    if not text.lstrip("-").isdigit():
+        await msg.answer("Нужно ввести числовой chat_id. Попробуй ещё раз или /cancel.")
+        return
+    chat_id = int(text)
+    await state.clear()
+    async with SessionLocal() as session:
+        sub = await session.get(Subscriber, chat_id)
+        if sub is None:
+            session.add(Subscriber(chat_id=chat_id, active=True))
+        else:
+            sub.active = True
+        await session.commit()
+    notified = True
+    try:
+        await msg.bot.send_message(chat_id, "✅ Доступ открыт! Напиши /start.")
+    except TelegramForbiddenError:
+        notified = False
+    except Exception as e:
+        logger.warning(f"notify failed for {chat_id}: {e}")
+        notified = False
+    if notified:
+        await msg.answer(f"✅ <code>{chat_id}</code> добавлен и уведомлён.", parse_mode="HTML", reply_markup=admin_menu())
+    else:
+        await msg.answer(
+            f"✅ <code>{chat_id}</code> добавлен. Уведомить не получилось — "
+            "пусть сам напишет /start боту.",
+            parse_mode="HTML",
+            reply_markup=admin_menu(),
+        )
+
+
+@router.message(AdminFSM.waiting_remove)
+async def fsm_remove_user(msg: Message, state: FSMContext) -> None:
+    text = (msg.text or "").strip()
+    if not text.lstrip("-").isdigit():
+        await msg.answer("Нужно ввести числовой chat_id. Попробуй ещё раз или /cancel.")
+        return
+    chat_id = int(text)
+    await state.clear()
+    await _unsubscribe(chat_id)
+    await msg.answer(f"🚫 <code>{chat_id}</code> удалён.", parse_mode="HTML", reply_markup=admin_menu())
 
 
 # ─────────────────────────── CALLBACKS ───────────────────────────

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
 
 
 def main_menu() -> InlineKeyboardMarkup:
@@ -19,6 +24,18 @@ def main_menu() -> InlineKeyboardMarkup:
         ],
         [InlineKeyboardButton(text="🔧 Фильтры", callback_data="menu:filters")],
     ])
+
+
+def admin_menu() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="👥 Подписчики"), KeyboardButton(text="➕ Добавить")],
+            [KeyboardButton(text="🚫 Удалить"),    KeyboardButton(text="📊 Статистика")],
+            [KeyboardButton(text="🎯 Сигналы"),    KeyboardButton(text="📅 Сегодня")],
+        ],
+        resize_keyboard=True,
+        persistent=True,
+    )
 
 
 def filters_menu() -> InlineKeyboardMarkup:
