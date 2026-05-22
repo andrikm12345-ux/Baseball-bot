@@ -21,7 +21,7 @@ from loguru import logger
 from sqlalchemy import and_, select
 
 from src.bot.access import is_allowed
-from src.bot.formatters import HELP, WELCOME, format_roi, format_signal, format_signal_short, format_stats_table
+from src.bot.formatters import HELP, WELCOME, fmt_msk, format_roi, format_signal, format_signal_short, format_stats_table
 from src.bot.keyboards import admin_menu, filters_menu, main_menu
 from src.config import settings
 from src.data.database import Match, PendingUser, SessionLocal, Signal, Subscriber, Team
@@ -571,8 +571,10 @@ async def _send_signals(
 
 
 async def _send_today(msg: Message) -> None:
-    today = datetime.utcnow().date()
-    start = datetime.combine(today, datetime.min.time())
+    from src.bot.formatters import msk_now, MSK_OFFSET
+    today_msk = msk_now().date()
+    start_msk = datetime.combine(today_msk, datetime.min.time())
+    start = start_msk - MSK_OFFSET  # back to UTC for DB comparison
     end = start + timedelta(days=1)
     async with SessionLocal() as session:
         rows = (await session.execute(
@@ -586,7 +588,7 @@ async def _send_today(msg: Message) -> None:
         for m in rows[:20]:
             h = await session.get(Team, m.home_team_id)
             a = await session.get(Team, m.away_team_id)
-            t = m.utc_date.strftime("%H:%M")
+            t = fmt_msk(m.utc_date, "%H:%M")
             sigs = (await session.execute(
                 select(Signal).where(Signal.match_id == m.id)
             )).scalars().all()
@@ -681,8 +683,11 @@ async def broadcast_signal(bot: Bot, text: str) -> int:
 
 async def broadcast_digest(bot: Bot) -> int:
     """Morning digest: list of today's signals (top 5 by edge)."""
+    from src.bot.formatters import msk_now, MSK_OFFSET
     now = datetime.utcnow()
-    end_of_day = now.replace(hour=23, minute=59, second=59)
+    today_msk = msk_now().date()
+    end_msk = datetime.combine(today_msk, datetime.min.time()) + timedelta(days=1)
+    end_of_day = end_msk - MSK_OFFSET  # back to UTC for DB
     async with SessionLocal() as session:
         rows = (await session.execute(
             select(Signal, Match)
@@ -693,12 +698,12 @@ async def broadcast_digest(bot: Bot) -> int:
         )).all()
         if not rows:
             return 0
-        lines = [f"☀️ <b>Утренний дайджест — {now.strftime('%d.%m.%Y')}</b>", ""]
+        lines = [f"☀️ <b>Утренний дайджест — {today_msk.strftime('%d.%m.%Y')}</b>", ""]
         for sig, m in rows:
             h = await session.get(Team, m.home_team_id)
             a = await session.get(Team, m.away_team_id)
             badge = "🎯" if sig.book_odds > 1.0 else "🤖"
-            kickoff = m.utc_date.strftime("%H:%M")
+            kickoff = fmt_msk(m.utc_date, "%H:%M")
             lines.append(
                 f"{badge} {kickoff} <i>{m.competition}</i> — {h.name} vs {a.name}\n"
                 f"   <b>{sig.market}</b> · <b>{sig.pick}</b> · {sig.model_prob*100:.0f}%"

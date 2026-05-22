@@ -1,10 +1,26 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Iterable
 
 from src.data.database import Match, Signal, Team
 from src.signals.tracker import RoiStats
+
+
+MSK_OFFSET = timedelta(hours=3)
+
+
+def to_msk(dt: datetime) -> datetime:
+    """Convert a naive UTC datetime (as stored in DB) to naive Moscow time."""
+    return dt + MSK_OFFSET
+
+
+def fmt_msk(dt: datetime, pattern: str) -> str:
+    return to_msk(dt).strftime(pattern)
+
+
+def msk_now() -> datetime:
+    return datetime.utcnow() + MSK_OFFSET
 
 
 _MARKET_LABEL = {
@@ -28,7 +44,7 @@ _PICK_LABEL = {
 def format_signal(
     sig: Signal, match: Match, home: Team, away: Team, ai_comment: str | None = None
 ) -> str:
-    kickoff = match.utc_date.strftime("%d.%m %H:%M UTC")
+    kickoff = fmt_msk(match.utc_date, "%d.%m %H:%M МСК")
     badge = "🎯 VALUE" if (sig.book_odds and sig.book_odds > 1.0) else "🤖 MODEL"
     if getattr(sig, "is_ai_ensemble", False):
         badge += " · 🧠 AI"
