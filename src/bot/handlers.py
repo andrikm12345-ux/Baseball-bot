@@ -18,6 +18,7 @@ from src.bot.formatters import HELP, WELCOME, format_roi, format_signal, format_
 from src.bot.keyboards import admin_menu, filters_menu, main_menu
 from src.config import settings
 from src.data.database import Match, SessionLocal, Signal, Subscriber, Team
+from src.data.settings_store import get_bool, set_bool
 from src.signals.tracker import roi_stats
 
 
@@ -246,6 +247,26 @@ async def btn_today(msg: Message) -> None:
     if not _is_admin(msg):
         return
     await _send_today(msg)
+
+
+@router.message(F.text == "🧠 AI ансамбль")
+async def btn_ai_toggle(msg: Message) -> None:
+    if not _is_admin(msg):
+        return
+    cur = await get_bool("ai_ensemble_enabled", False)
+    new = not cur
+    await set_bool("ai_ensemble_enabled", new)
+    status = "🟢 ВКЛ" if new else "🔴 ВЫКЛ"
+    detail = (
+        "Claude участвует в анализе топ-кандидатов с веб-поиском. "
+        "Эффект увидишь в следующем цикле генерации."
+        if new
+        else "Только XGBoost. AI отключён."
+    )
+    await msg.answer(
+        f"AI-ансамбль: <b>{status}</b>\n\n{detail}",
+        parse_mode="HTML",
+    )
 
 
 @router.message(Command("cancel"))

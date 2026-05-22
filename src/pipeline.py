@@ -9,6 +9,7 @@ from loguru import logger
 from sqlalchemy import select
 
 from src.ai.commentary import generate_commentary
+from src.ai.predictor import ai_predict
 from src.bot.formatters import format_signal
 from src.bot.handlers import broadcast_signal
 from src.config import settings
@@ -17,6 +18,7 @@ from src.data.features import build_features, build_inference_features
 from src.data.football_api import FootballDataClient
 from src.data.ingest import ingest_history, ingest_upcoming
 from src.data.odds_api import OddsApiClient, fetch_odds_for_matches
+from src.data.settings_store import get_bool
 from src.ml.predict import Predictor
 from src.ml.train import train_all
 from src.signals.generator import Signal, generate
@@ -155,6 +157,9 @@ async def generate_and_broadcast(bot) -> int:
             preds[col] = preds["match_id"].map(lambda m: (odds_map.get(int(m)) or {}).get(col, 0.0))
         logger.info(f"Attached odds to {sum(1 for v in odds_map.values() if v)}/{len(preds)} matches")
 
+    if await get_bool("ai_ensemble_enabled", False):
+        preds = await _apply_ai_ensemble(preds, feats)
+
     signals = generate(preds)
     new_rows = await _store_signals(signals)
     sent = 0
@@ -185,6 +190,81 @@ async def generate_and_broadcast(bot) -> int:
                 sent += await broadcast_signal(bot, text)
     logger.info(f"Generated {len(new_rows)} new signals, broadcast {sent} messages")
     return len(new_rows)
+
+
+async def _apply_ai_ensemble(preds: pd.DataFrame, feats: pd.DataFrame) -> pd.DataFrame:
+    """Blend XGBoost preds with AI predictor for top-N most confident matches."""
+    import asyncio
+
+    weight = settings.ai_ensemble_weight
+    top_n = settings.ai_ensemble_top_n
+
+    feats_by_id = {int(r["match_id"]): r.to_dict() for _, r in feats.iterrows()}
+    preds = preds.copy()
+    preds["_max_1x2"] = preds[["p_home", "p_draw", "p_away"]].max(axis=1)
+    candidates = preds.sort_values("_max_1x2", ascending=False).head(top_n)
+    preds.drop(columns=["_max_1x2"], inplace=True)
+
+    if candidates.empty:
+        return preds
+
+    async with SessionLocal() as session:
+        tasks = []
+        match_meta = {}
+        for _, row in candidates.iterrows():
+            mid = int(row["match_id"])
+            match = await session.get(Match, mid)
+            if not match:
+                continue
+            home = await session.get(Team, match.home_team_id)
+            away = await session.get(Team, match.away_team_id)
+            if not home or not away:
+                continue
+            match_meta[mid] = (home.name, away.name, match.competition)
+            tasks.append((mid, row))
+
+    sem = asyncio.Semaphore(3)
+
+    async def _one(mid: int, row) -> tuple[int, dict | None]:
+        async with sem:
+            ml_probs = {
+                "p_home": float(row["p_home"]),
+                "p_draw": float(row["p_draw"]),
+                "p_away": float(row["p_away"]),
+                "p_over25": float(row["p_over25"]),
+                "p_btts": float(row["p_btts"]),
+            }
+            home, away, comp = match_meta[mid]
+            ai = await ai_predict(
+                match_id=mid,
+                home=home, away=away, competition=comp,
+                ml_probs=ml_probs,
+                features=feats_by_id.get(mid, {}),
+            )
+            return mid, ai
+
+    results = await asyncio.gather(*[_one(mid, r) for mid, r in tasks])
+
+    applied = 0
+    diffs = []
+    for mid, ai in results:
+        if not ai:
+            continue
+        mask = preds["match_id"] == mid
+        for col in ("p_home", "p_draw", "p_away", "p_over25", "p_btts"):
+            ml_v = float(preds.loc[mask, col].iloc[0])
+            ai_v = float(ai[col])
+            diffs.append(abs(ml_v - ai_v))
+            preds.loc[mask, col] = (1 - weight) * ml_v + weight * ai_v
+        applied += 1
+
+    if applied:
+        avg_diff = sum(diffs) / len(diffs) if diffs else 0
+        logger.info(
+            f"AI ensemble applied to {applied}/{len(tasks)} matches "
+            f"(weight={weight}, avg |ml-ai| = {avg_diff:.3f})"
+        )
+    return preds
 
 
 async def daily_cycle(bot) -> None:

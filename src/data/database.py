@@ -98,6 +98,15 @@ class Subscriber(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class Setting(Base):
+    __tablename__ = "settings_kv"
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

@@ -55,10 +55,10 @@ def _resolve_provider() -> tuple[str, str, str, str]:
     return "anthropic", "https://api.anthropic.com/v1/messages", settings.anthropic_api_key, model
 
 
-async def _call_openai(url: str, key: str, model: str, prompt: str) -> Optional[str]:
+async def _call_openai(url: str, key: str, model: str, prompt: str, max_tokens: int = 350) -> Optional[str]:
     body = {
         "model": model,
-        "max_tokens": 350,
+        "max_tokens": max_tokens,
         "messages": [{"role": "user", "content": prompt}],
     }
     headers = {
@@ -66,7 +66,7 @@ async def _call_openai(url: str, key: str, model: str, prompt: str) -> Optional[
         "Content-Type": "application/json",
     }
     async with aiohttp.ClientSession() as s:
-        async with s.post(url, json=body, headers=headers, timeout=30) as r:
+        async with s.post(url, json=body, headers=headers, timeout=60) as r:
             if r.status != 200:
                 text = await r.text()
                 logger.warning(f"LLM OpenAI-proxy {r.status} ({model}): {text[:300]}")
@@ -79,10 +79,10 @@ async def _call_openai(url: str, key: str, model: str, prompt: str) -> Optional[
         return None
 
 
-async def _call_anthropic(url: str, key: str, model: str, prompt: str) -> Optional[str]:
+async def _call_anthropic(url: str, key: str, model: str, prompt: str, max_tokens: int = 350) -> Optional[str]:
     body = {
         "model": model,
-        "max_tokens": 350,
+        "max_tokens": max_tokens,
         "messages": [{"role": "user", "content": prompt}],
     }
     headers = {
@@ -91,7 +91,7 @@ async def _call_anthropic(url: str, key: str, model: str, prompt: str) -> Option
         "content-type": "application/json",
     }
     async with aiohttp.ClientSession() as s:
-        async with s.post(url, json=body, headers=headers, timeout=30) as r:
+        async with s.post(url, json=body, headers=headers, timeout=60) as r:
             if r.status != 200:
                 text = await r.text()
                 logger.warning(f"Anthropic API {r.status} ({model}): {text[:300]}")
@@ -100,6 +100,22 @@ async def _call_anthropic(url: str, key: str, model: str, prompt: str) -> Option
     return "".join(
         block.get("text", "") for block in data.get("content", []) if block.get("type") == "text"
     ).strip()
+
+
+async def call_llm(prompt: str, max_tokens: int = 350) -> Optional[str]:
+    mode, url, key, model = _resolve_provider()
+    if not key:
+        return None
+    try:
+        if mode == "openai":
+            return await _call_openai(url, key, model, prompt, max_tokens=max_tokens)
+        return await _call_anthropic(url, key, model, prompt, max_tokens=max_tokens)
+    except asyncio.TimeoutError:
+        logger.warning("LLM timeout")
+        return None
+    except Exception as e:
+        logger.warning(f"LLM call failed: {e}")
+        return None
 
 
 async def generate_commentary(
