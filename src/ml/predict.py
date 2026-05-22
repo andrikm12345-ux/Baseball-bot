@@ -23,7 +23,11 @@ class Predictor:
         if not path.exists():
             return None
         try:
-            return joblib.load(path)
+            d = joblib.load(path)
+            if d.get("features") != FEATURE_COLUMNS:
+                logger.warning(f"{path.name}: feature mismatch — retraining required")
+                return None
+            return d
         except Exception as e:
             logger.error(f"Cannot load {path}: {e}")
             return None

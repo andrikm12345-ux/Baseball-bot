@@ -29,8 +29,44 @@ FEATURE_COLUMNS = [
     "away_ga_away_avg",
     "h2h_home_winrate",
     "h2h_avg_goals",
+    "h2h_home_avg_goals",
+    "h2h_away_avg_goals",
+    "h2h_recency_winrate",
     "rest_diff",
 ]
+
+
+def _h2h_features(h2h_list: Deque[Tuple[int, int]], home_id: int, key_first_id: int) -> Dict[str, float]:
+    if not h2h_list:
+        return {
+            "h2h_home_winrate": 0.5,
+            "h2h_avg_goals": 2.6,
+            "h2h_home_avg_goals": 1.4,
+            "h2h_away_avg_goals": 1.2,
+            "h2h_recency_winrate": 0.5,
+        }
+    home_is_first = home_id == key_first_id
+    n = len(h2h_list)
+    weights = list(range(1, n + 1))
+    total_w = sum(weights)
+    home_g: List[int] = []
+    away_g: List[int] = []
+    wins = 0
+    weighted_wins = 0
+    for w, (g0, g1) in zip(weights, h2h_list):
+        hg, ag = (g0, g1) if home_is_first else (g1, g0)
+        home_g.append(hg)
+        away_g.append(ag)
+        if hg > ag:
+            wins += 1
+            weighted_wins += w
+    return {
+        "h2h_home_winrate": wins / n,
+        "h2h_avg_goals": float(np.mean([g0 + g1 for g0, g1 in h2h_list])),
+        "h2h_home_avg_goals": float(np.mean(home_g)),
+        "h2h_away_avg_goals": float(np.mean(away_g)),
+        "h2h_recency_winrate": weighted_wins / total_w,
+    }
 
 
 @dataclass
@@ -87,7 +123,7 @@ def build_features(matches_df: pd.DataFrame) -> pd.DataFrame:
     df = matches_df.sort_values("utc_date").reset_index(drop=True).copy()
 
     team_state: Dict[int, TeamState] = defaultdict(TeamState)
-    h2h: Dict[Tuple[int, int], Deque[Tuple[int, int]]] = defaultdict(lambda: deque(maxlen=6))
+    h2h: Dict[Tuple[int, int], Deque[Tuple[int, int]]] = defaultdict(lambda: deque(maxlen=10))
 
     feats: List[Dict[str, float]] = []
     targets: List[Dict[str, float]] = []
@@ -107,13 +143,7 @@ def build_features(matches_df: pd.DataFrame) -> pd.DataFrame:
 
         key = tuple(sorted([home_id, away_id]))
         h2h_list = h2h[key]
-        if h2h_list:
-            home_wins = sum(1 for gh, ga in h2h_list if gh > ga)
-            h2h_home_wr = home_wins / len(h2h_list)
-            h2h_avg_g = float(np.mean([gh + ga for gh, ga in h2h_list]))
-        else:
-            h2h_home_wr = 0.5
-            h2h_avg_g = 2.6
+        h2h_feats = _h2h_features(h2h_list, home_id, key[0])
 
         feat = {
             "elo_diff": h.elo - a.elo,
@@ -129,8 +159,7 @@ def build_features(matches_df: pd.DataFrame) -> pd.DataFrame:
             "home_ga_home_avg": _avg(h.last_home, 1),
             "away_gf_away_avg": _avg(a.last_away, 0),
             "away_ga_away_avg": _avg(a.last_away, 1),
-            "h2h_home_winrate": h2h_home_wr,
-            "h2h_avg_goals": h2h_avg_g,
+            **h2h_feats,
             "rest_diff": rest_h - rest_a,
         }
 
@@ -176,7 +205,7 @@ def build_inference_features(
     all_df = pd.concat([history_df, upcoming_df], ignore_index=True).sort_values("utc_date").reset_index(drop=True)
 
     team_state: Dict[int, TeamState] = defaultdict(TeamState)
-    h2h: Dict[Tuple[int, int], Deque[Tuple[int, int]]] = defaultdict(lambda: deque(maxlen=6))
+    h2h: Dict[Tuple[int, int], Deque[Tuple[int, int]]] = defaultdict(lambda: deque(maxlen=10))
 
     rows: List[Dict[str, float]] = []
     upcoming_ids = set(upcoming_df["id"].astype(int).tolist())
@@ -192,13 +221,7 @@ def build_inference_features(
 
         key = tuple(sorted([home_id, away_id]))
         h2h_list = h2h[key]
-        if h2h_list:
-            home_wins = sum(1 for gh, ga in h2h_list if gh > ga)
-            h2h_home_wr = home_wins / len(h2h_list)
-            h2h_avg_g = float(np.mean([gh + ga for gh, ga in h2h_list]))
-        else:
-            h2h_home_wr = 0.5
-            h2h_avg_g = 2.6
+        h2h_feats = _h2h_features(h2h_list, home_id, key[0])
 
         feat = {
             "match_id": int(row["id"]),
@@ -215,8 +238,7 @@ def build_inference_features(
             "home_ga_home_avg": _avg(h.last_home, 1),
             "away_gf_away_avg": _avg(a.last_away, 0),
             "away_ga_away_avg": _avg(a.last_away, 1),
-            "h2h_home_winrate": h2h_home_wr,
-            "h2h_avg_goals": h2h_avg_g,
+            **h2h_feats,
             "rest_diff": rest_h - rest_a,
         }
         rows.append(feat)

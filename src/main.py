@@ -35,12 +35,19 @@ async def _on_startup(bot: Bot) -> None:
 async def _first_boot_warmup(bot: Bot) -> None:
     from sqlalchemy import select, func
     from src.data.database import Match, SessionLocal
+    from src.ml.predict import Predictor
     try:
         async with SessionLocal() as s:
             n = (await s.execute(select(func.count(Match.id)))).scalar_one()
-        if n < 100:
+        cold_start = n < 100
+        predictor_stale = not Predictor().ready
+        if cold_start:
             logger.info("Cold start: bootstrapping historical data")
             await bootstrap_history()
+        if cold_start or predictor_stale:
+            logger.info(
+                f"Training models (cold_start={cold_start}, stale={predictor_stale})"
+            )
             await train_models()
             await refresh_upcoming(days=7)
             await generate_and_broadcast(bot)
