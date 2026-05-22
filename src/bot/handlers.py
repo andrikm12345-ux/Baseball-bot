@@ -5,11 +5,13 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from aiogram import Bot, Dispatcher, F, Router
+from aiogram.exceptions import TelegramForbiddenError
 from aiogram.filters import Command, CommandStart
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from loguru import logger
 from sqlalchemy import and_, select
 
+from src.bot.access import is_allowed
 from src.bot.formatters import HELP, WELCOME, format_roi, format_signal
 from src.bot.keyboards import filters_menu, main_menu
 from src.config import settings
@@ -25,7 +27,15 @@ router = Router()
 
 @router.message(CommandStart())
 async def cmd_start(msg: Message) -> None:
-    await msg.answer(WELCOME, parse_mode="HTML", reply_markup=main_menu())
+    if await is_allowed(msg.chat.id):
+        await msg.answer(WELCOME, parse_mode="HTML", reply_markup=main_menu())
+        return
+    locked = (
+        "🔒 Доступ ограничен.\n\n"
+        f"Твой ID: <code>{msg.chat.id}</code>\n\n"
+        "Перешли этот номер админу — он откроет тебе доступ."
+    )
+    await msg.answer(locked, parse_mode="HTML")
 
 
 @router.message(Command("help"))
@@ -84,6 +94,77 @@ async def cmd_admin(msg: Message) -> None:
         f"<b>Admin</b>\nПодписчики: {n_subs}\nСигналы в БД: {n_sig}\nМатчи в БД: {n_match}",
         parse_mode="HTML",
     )
+
+
+@router.message(Command("allow"))
+async def cmd_allow(msg: Message) -> None:
+    if not msg.from_user or msg.from_user.id not in settings.admin_ids:
+        return
+    parts = (msg.text or "").split(maxsplit=2)
+    if len(parts) < 2 or not parts[1].lstrip("-").isdigit():
+        await msg.answer("Использование: <code>/allow &lt;chat_id&gt; [username]</code>", parse_mode="HTML")
+        return
+    chat_id = int(parts[1])
+    username = parts[2].lstrip("@") if len(parts) > 2 else None
+    async with SessionLocal() as session:
+        sub = await session.get(Subscriber, chat_id)
+        if sub is None:
+            session.add(Subscriber(chat_id=chat_id, username=username, active=True))
+        else:
+            sub.active = True
+            if username:
+                sub.username = username
+        await session.commit()
+    notified = True
+    try:
+        await msg.bot.send_message(chat_id, "✅ Доступ открыт! Напиши /start.")
+    except TelegramForbiddenError:
+        notified = False
+    except Exception as e:
+        logger.warning(f"/allow notify failed for {chat_id}: {e}")
+        notified = False
+    if notified:
+        await msg.answer(f"✅ <code>{chat_id}</code> добавлен и уведомлён.", parse_mode="HTML")
+    else:
+        await msg.answer(
+            f"✅ <code>{chat_id}</code> добавлен. Уведомить не получилось — "
+            "пусть сам напишет /start боту.",
+            parse_mode="HTML",
+        )
+
+
+@router.message(Command("deny"))
+async def cmd_deny(msg: Message) -> None:
+    if not msg.from_user or msg.from_user.id not in settings.admin_ids:
+        return
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].lstrip("-").isdigit():
+        await msg.answer("Использование: <code>/deny &lt;chat_id&gt;</code>", parse_mode="HTML")
+        return
+    chat_id = int(parts[1])
+    await _unsubscribe(chat_id)
+    await msg.answer(f"🚫 <code>{chat_id}</code> отозван.", parse_mode="HTML")
+
+
+@router.message(Command("allowed"))
+async def cmd_allowed(msg: Message) -> None:
+    if not msg.from_user or msg.from_user.id not in settings.admin_ids:
+        return
+    async with SessionLocal() as session:
+        rows = (await session.execute(
+            select(Subscriber).where(Subscriber.active.is_(True))
+            .order_by(Subscriber.subscribed_at.desc())
+            .limit(50)
+        )).scalars().all()
+    if not rows:
+        await msg.answer("Активных подписчиков нет.")
+        return
+    lines = [f"<b>Активные подписчики ({len(rows)}):</b>"]
+    for s in rows:
+        uname = f"@{s.username}" if s.username else "—"
+        date = s.subscribed_at.strftime("%Y-%m-%d")
+        lines.append(f"<code>{s.chat_id}</code>  {uname}  {date}")
+    await msg.answer("\n".join(lines), parse_mode="HTML")
 
 
 # ─────────────────────────── CALLBACKS ───────────────────────────
@@ -278,6 +359,9 @@ async def broadcast_signal(bot: Bot, text: str) -> int:
         try:
             await bot.send_message(s.chat_id, text, parse_mode="HTML")
             sent += 1
+        except TelegramForbiddenError:
+            logger.info(f"Subscriber {s.chat_id} auto-deactivated: TelegramForbiddenError")
+            await _unsubscribe(s.chat_id)
         except Exception as e:
             logger.warning(f"Send to {s.chat_id} failed: {e}")
     return sent
@@ -318,6 +402,9 @@ async def broadcast_digest(bot: Bot) -> int:
         try:
             await bot.send_message(s.chat_id, text, parse_mode="HTML")
             sent += 1
+        except TelegramForbiddenError:
+            logger.info(f"Subscriber {s.chat_id} auto-deactivated: TelegramForbiddenError")
+            await _unsubscribe(s.chat_id)
         except Exception as e:
             logger.warning(f"Digest to {s.chat_id} failed: {e}")
     return sent

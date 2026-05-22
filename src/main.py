@@ -10,6 +10,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from loguru import logger
 
+from src.bot.access import AccessControlMiddleware
 from src.bot.handlers import broadcast_digest, register
 from src.config import settings
 from src.data.database import init_db
@@ -60,6 +61,9 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode="HTML"),
     )
     dp = Dispatcher()
+    access_mw = AccessControlMiddleware()
+    dp.message.middleware(access_mw)
+    dp.callback_query.middleware(access_mw)
     register(dp)
 
     scheduler = AsyncIOScheduler(timezone=settings.tz)
