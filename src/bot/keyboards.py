@@ -68,16 +68,6 @@ def filters_menu() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="Тотал 2.5", callback_data="filter:market:OU25"),
             InlineKeyboardButton(text="Обе забьют", callback_data="filter:market:BTTS"),
         ],
-        [
-            InlineKeyboardButton(text="ИТБ1 0.5", callback_data="filter:market:HOME_OVER05"),
-            InlineKeyboardButton(text="ИТБ1 1.5", callback_data="filter:market:HOME_OVER15"),
-            InlineKeyboardButton(text="ИТБ1 2.5", callback_data="filter:market:HOME_OVER25"),
-        ],
-        [
-            InlineKeyboardButton(text="ИТБ2 0.5", callback_data="filter:market:AWAY_OVER05"),
-            InlineKeyboardButton(text="ИТБ2 1.5", callback_data="filter:market:AWAY_OVER15"),
-            InlineKeyboardButton(text="ИТБ2 2.5", callback_data="filter:market:AWAY_OVER25"),
-        ],
     ]
     type_row = [
         InlineKeyboardButton(text="🎯 Только VALUE", callback_data="filter:type:VALUE"),
