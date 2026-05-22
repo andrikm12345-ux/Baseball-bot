@@ -81,9 +81,12 @@ async def train_models() -> None:
     logger.info(f"Models saved: {paths}")
 
 
-async def _store_signals(signals: List[Signal]) -> List[SignalRow]:
+async def _store_signals(
+    signals: List[Signal], ai_match_ids: set[int] | None = None
+) -> List[SignalRow]:
     """Persist signals, de-duplicating by (match, market, pick)."""
     stored: List[SignalRow] = []
+    ai_ids = ai_match_ids or set()
     async with SessionLocal() as session:
         for s in signals:
             exists = (await session.execute(
@@ -97,6 +100,7 @@ async def _store_signals(signals: List[Signal]) -> List[SignalRow]:
                 continue
             row = SignalRow(
                 match_id=s.match_id, market=s.market, pick=s.pick,
+                is_ai_ensemble=(s.match_id in ai_ids),
                 model_prob=s.model_prob, fair_odds=s.fair_odds,
                 book_odds=s.book_odds, edge=s.edge, confidence=s.confidence,
                 stake_units=s.stake_units,
@@ -157,11 +161,12 @@ async def generate_and_broadcast(bot) -> int:
             preds[col] = preds["match_id"].map(lambda m: (odds_map.get(int(m)) or {}).get(col, 0.0))
         logger.info(f"Attached odds to {sum(1 for v in odds_map.values() if v)}/{len(preds)} matches")
 
+    ai_match_ids: set[int] = set()
     if await get_bool("ai_ensemble_enabled", False):
-        preds = await _apply_ai_ensemble(preds, feats)
+        preds, ai_match_ids = await _apply_ai_ensemble(preds, feats)
 
     signals = generate(preds)
-    new_rows = await _store_signals(signals)
+    new_rows = await _store_signals(signals, ai_match_ids=ai_match_ids)
     sent = 0
     if new_rows and bot:
         feats_by_id = {int(r["match_id"]): r.to_dict() for _, r in feats.iterrows()}
@@ -192,8 +197,13 @@ async def generate_and_broadcast(bot) -> int:
     return len(new_rows)
 
 
-async def _apply_ai_ensemble(preds: pd.DataFrame, feats: pd.DataFrame) -> pd.DataFrame:
-    """Blend XGBoost preds with AI predictor for top-N most confident matches."""
+async def _apply_ai_ensemble(
+    preds: pd.DataFrame, feats: pd.DataFrame
+) -> tuple[pd.DataFrame, set[int]]:
+    """Blend XGBoost preds with AI predictor for top-N most confident matches.
+
+    Returns (modified_preds, set_of_match_ids_actually_corrected_by_ai).
+    """
     import asyncio
 
     weight = settings.ai_ensemble_weight
@@ -206,7 +216,7 @@ async def _apply_ai_ensemble(preds: pd.DataFrame, feats: pd.DataFrame) -> pd.Dat
     preds.drop(columns=["_max_1x2"], inplace=True)
 
     if candidates.empty:
-        return preds
+        return preds, set()
 
     async with SessionLocal() as session:
         tasks = []
@@ -245,7 +255,7 @@ async def _apply_ai_ensemble(preds: pd.DataFrame, feats: pd.DataFrame) -> pd.Dat
 
     results = await asyncio.gather(*[_one(mid, r) for mid, r in tasks])
 
-    applied = 0
+    applied: set[int] = set()
     diffs = []
     for mid, ai in results:
         if not ai:
@@ -256,15 +266,15 @@ async def _apply_ai_ensemble(preds: pd.DataFrame, feats: pd.DataFrame) -> pd.Dat
             ai_v = float(ai[col])
             diffs.append(abs(ml_v - ai_v))
             preds.loc[mask, col] = (1 - weight) * ml_v + weight * ai_v
-        applied += 1
+        applied.add(mid)
 
     if applied:
         avg_diff = sum(diffs) / len(diffs) if diffs else 0
         logger.info(
-            f"AI ensemble applied to {applied}/{len(tasks)} matches "
+            f"AI ensemble applied to {len(applied)}/{len(tasks)} matches "
             f"(weight={weight}, avg |ml-ai| = {avg_diff:.3f})"
         )
-    return preds
+    return preds, applied
 
 
 async def daily_cycle(bot) -> None:

@@ -55,6 +55,33 @@ def format_signal_short(sigs: list[Signal]) -> str:
     return f"🤖 {market} {pick} · уверенность {best.confidence*100:.0f}%"
 
 
+def format_stats_table(
+    model_s: RoiStats,
+    value_s: RoiStats,
+    ai_s: RoiStats,
+    total_s: RoiStats,
+) -> str:
+    def _row(label: str, s: RoiStats) -> str:
+        if s.n_settled == 0:
+            return f"{label}  —  пока нет ставок"
+        return (
+            f"{label}\n"
+            f"  Ставок: <b>{s.n_settled}</b> · Зашло: <b>{s.n_won}</b> "
+            f"({s.hit_rate:.1f}%)\n"
+            f"  ROI: <b>{s.roi:+.2f}%</b> · Прибыль: <b>{s.profit:+.2f}</b> ед."
+        )
+
+    return (
+        "<b>📈 СТАТИСТИКА</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{_row('🤖 MODEL (без линий)', model_s)}\n\n"
+        f"{_row('🎯 VALUE (edge ≥ 5%)', value_s)}\n\n"
+        f"{_row('🧠 AI-ансамбль', ai_s)}\n"
+        "━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{_row('ИТОГО', total_s)}"
+    )
+
+
 def format_roi(stats: RoiStats, title: str = "ROI") -> str:
     if stats.n_settled == 0:
         return f"<b>{title}</b>\nЕщё нет рассчитанных ставок."

@@ -82,6 +82,7 @@ class Signal(Base):
     won: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     profit_units: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     commentary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    is_ai_ensemble: Mapped[bool] = mapped_column(Boolean, default=False)
 
     match = relationship("Match")
 
@@ -114,3 +115,9 @@ async def init_db() -> None:
             await conn.execute(text("ALTER TABLE signals ADD COLUMN IF NOT EXISTS commentary TEXT"))
         except Exception as e:
             logger.warning(f"commentary column migration skipped: {e}")
+        try:
+            await conn.execute(text(
+                "ALTER TABLE signals ADD COLUMN IF NOT EXISTS is_ai_ensemble BOOLEAN DEFAULT FALSE"
+            ))
+        except Exception as e:
+            logger.warning(f"is_ai_ensemble column migration skipped: {e}")

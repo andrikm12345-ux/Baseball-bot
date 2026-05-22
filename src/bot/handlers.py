@@ -14,7 +14,7 @@ from loguru import logger
 from sqlalchemy import and_, select
 
 from src.bot.access import is_allowed
-from src.bot.formatters import HELP, WELCOME, format_roi, format_signal, format_signal_short
+from src.bot.formatters import HELP, WELCOME, format_roi, format_signal, format_signal_short, format_stats_table
 from src.bot.keyboards import admin_menu, filters_menu, main_menu
 from src.config import settings
 from src.data.database import Match, SessionLocal, Signal, Subscriber, Team
@@ -442,14 +442,11 @@ async def _send_today(msg: Message) -> None:
 
 
 async def _send_stats(msg: Message) -> None:
-    all_stats = await roi_stats(only_value=False)
-    val_stats = await roi_stats(only_value=True)
-    last30 = await roi_stats(last_n=30, only_value=False)
-    text = (
-        format_roi(all_stats, "Общий ROI") + "\n\n"
-        + format_roi(val_stats, "Только VALUE-сигналы") + "\n\n"
-        + format_roi(last30, "Последние 30 ставок")
-    )
+    model_s = await roi_stats(only_value=False)
+    value_s = await roi_stats(only_value=True)
+    ai_s = await roi_stats(only_value=None, ai_only=True)
+    total_s = await roi_stats(only_value=None)
+    text = format_stats_table(model_s, value_s, ai_s, total_s)
     await msg.answer(text, parse_mode="HTML")
 
 

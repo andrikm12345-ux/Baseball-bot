@@ -65,14 +65,32 @@ async def settle_pending() -> int:
     return settled
 
 
-async def roi_stats(last_n: int | None = None, only_value: bool = True) -> RoiStats:
+async def roi_stats(
+    last_n: int | None = None,
+    only_value: bool | None = True,
+    ai_only: bool | None = None,
+) -> RoiStats:
+    """ROI summary with optional filters.
+
+    only_value:
+      - True  → keep only signals with book_odds > 1.0 (VALUE)
+      - False → keep only signals without odds (MODEL)
+      - None  → don't filter by value/model
+    ai_only:
+      - True  → only signals with is_ai_ensemble=True
+      - None  → don't filter
+    """
     async with SessionLocal() as session:
         q = select(Signal).where(Signal.settled.is_(True)).order_by(Signal.created_at.desc())
         if last_n:
             q = q.limit(last_n)
         rows: List[Signal] = list((await session.execute(q)).scalars())
-    if only_value:
+    if only_value is True:
         rows = [r for r in rows if r.book_odds and r.book_odds > 1.0]
+    elif only_value is False:
+        rows = [r for r in rows if not r.book_odds or r.book_odds <= 1.0]
+    if ai_only:
+        rows = [r for r in rows if getattr(r, "is_ai_ensemble", False)]
     n = len(rows)
     if n == 0:
         return RoiStats(0, 0, 0, 0, 0, 0.0, 0.0)
