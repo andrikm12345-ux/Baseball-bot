@@ -27,9 +27,24 @@ from src.signals.tracker import settle_pending
 async def _on_startup(bot: Bot) -> None:
     await init_db()
     logger.info("DB initialised")
+    await _purge_disabled_market_signals()
     # On the very first boot, bootstrap history in the background so the
     # bot is responsive immediately.
     asyncio.create_task(_first_boot_warmup(bot))
+
+
+async def _purge_disabled_market_signals() -> None:
+    from sqlalchemy import delete
+    from src.data.database import SessionLocal, Signal
+    from src.pipeline import DISABLED_MARKETS
+
+    async with SessionLocal() as session:
+        result = await session.execute(
+            delete(Signal).where(Signal.market.in_(DISABLED_MARKETS))
+        )
+        await session.commit()
+        if result.rowcount:
+            logger.warning(f"Purged {result.rowcount} stale ITB signals from DB")
 
 
 async def _first_boot_warmup(bot: Bot) -> None:

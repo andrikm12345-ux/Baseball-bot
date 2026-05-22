@@ -93,6 +93,12 @@ async def _notify_admins_training(bot, metrics: dict) -> None:
             logger.warning(f"train notify to {admin_id} failed: {e}")
 
 
+DISABLED_MARKETS: set[str] = {
+    "HOME_OVER05", "HOME_OVER15", "HOME_OVER25",
+    "AWAY_OVER05", "AWAY_OVER15", "AWAY_OVER25",
+}
+
+
 async def _store_signals(
     signals: List[Signal], ai_match_ids: set[int] | None = None
 ) -> List[SignalRow]:
@@ -101,6 +107,8 @@ async def _store_signals(
     ai_ids = ai_match_ids or set()
     async with SessionLocal() as session:
         for s in signals:
+            if s.market in DISABLED_MARKETS:
+                continue
             exists = (await session.execute(
                 select(SignalRow).where(
                     SignalRow.match_id == s.match_id,

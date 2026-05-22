@@ -551,6 +551,9 @@ async def _send_signals(
             stmt = stmt.where(Match.competition == league)
         if market:
             stmt = stmt.where(Signal.market == market)
+        else:
+            from src.pipeline import DISABLED_MARKETS
+            stmt = stmt.where(Signal.market.notin_(DISABLED_MARKETS))
         if only_value:
             stmt = stmt.where(Signal.book_odds > 1.0)
         stmt = stmt.order_by(Signal.edge.desc(), Signal.confidence.desc()).limit(10)
