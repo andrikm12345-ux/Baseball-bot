@@ -176,6 +176,12 @@ def build_features(matches_df: pd.DataFrame) -> pd.DataFrame:
                     "over25": int(total_goals > 2),
                     "btts": btts,
                     "total_goals": total_goals,
+                    "home_over05": int(hg > 0),
+                    "home_over15": int(hg > 1),
+                    "home_over25": int(hg > 2),
+                    "away_over05": int(ag > 0),
+                    "away_over15": int(ag > 1),
+                    "away_over25": int(ag > 2),
                 }
             )
             feats.append({"match_id": int(row["id"]), **feat})

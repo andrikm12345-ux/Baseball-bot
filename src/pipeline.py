@@ -267,6 +267,12 @@ async def _apply_ai_ensemble(
                 "p_over25": float(row["p_over25"]),
                 "p_btts": float(row["p_btts"]),
             }
+            for col in (
+                "p_home_over05", "p_home_over15", "p_home_over25",
+                "p_away_over05", "p_away_over15", "p_away_over25",
+            ):
+                if col in row and pd.notna(row[col]):
+                    ml_probs[col] = float(row[col])
             home, away, comp = match_meta[mid]
             ai = await ai_predict(
                 match_id=mid,
@@ -286,6 +292,19 @@ async def _apply_ai_ensemble(
         mask = preds["match_id"] == mid
         for col in ("p_home", "p_draw", "p_away", "p_over25", "p_btts"):
             ml_v = float(preds.loc[mask, col].iloc[0])
+            ai_v = float(ai[col])
+            diffs.append(abs(ml_v - ai_v))
+            preds.loc[mask, col] = (1 - weight) * ml_v + weight * ai_v
+        for col in (
+            "p_home_over05", "p_home_over15", "p_home_over25",
+            "p_away_over05", "p_away_over15", "p_away_over25",
+        ):
+            if col not in ai or col not in preds.columns:
+                continue
+            cur = preds.loc[mask, col].iloc[0]
+            if pd.isna(cur):
+                continue
+            ml_v = float(cur)
             ai_v = float(ai[col])
             diffs.append(abs(ml_v - ai_v))
             preds.loc[mask, col] = (1 - weight) * ml_v + weight * ai_v

@@ -43,26 +43,47 @@ def admin_menu(ai_enabled: bool = False) -> ReplyKeyboardMarkup:
     )
 
 
+_LEAGUE_FLAG = {
+    "PL": "🏴", "PD": "🇪🇸", "SA": "🇮🇹", "BL1": "🇩🇪", "FL1": "🇫🇷",
+    "CL": "🏆", "DED": "🇳🇱", "PPL": "🇵🇹", "ELC": "🏴", "BSA": "🇧🇷",
+    "CLI": "🏆", "EC": "🏆", "WC": "🏆",
+}
+
+
 def filters_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🏴 PL", callback_data="filter:league:PL"),
-            InlineKeyboardButton(text="🇪🇸 PD", callback_data="filter:league:PD"),
-            InlineKeyboardButton(text="🇮🇹 SA", callback_data="filter:league:SA"),
-        ],
-        [
-            InlineKeyboardButton(text="🇩🇪 BL1", callback_data="filter:league:BL1"),
-            InlineKeyboardButton(text="🇫🇷 FL1", callback_data="filter:league:FL1"),
-            InlineKeyboardButton(text="🏆 CL", callback_data="filter:league:CL"),
-        ],
+    from src.config import settings
+
+    league_btns = [
+        InlineKeyboardButton(
+            text=f"{_LEAGUE_FLAG.get(c, '🌍')} {c}",
+            callback_data=f"filter:league:{c}",
+        )
+        for c in settings.competitions
+    ]
+    league_rows = [league_btns[i:i + 3] for i in range(0, len(league_btns), 3)]
+
+    market_rows = [
         [
             InlineKeyboardButton(text="Исход 1X2", callback_data="filter:market:1X2"),
             InlineKeyboardButton(text="Тотал 2.5", callback_data="filter:market:OU25"),
             InlineKeyboardButton(text="Обе забьют", callback_data="filter:market:BTTS"),
         ],
         [
-            InlineKeyboardButton(text="🎯 Только VALUE", callback_data="filter:type:VALUE"),
-            InlineKeyboardButton(text="🤖 Все", callback_data="filter:type:ALL"),
+            InlineKeyboardButton(text="ИТБ1 0.5", callback_data="filter:market:HOME_OVER05"),
+            InlineKeyboardButton(text="ИТБ1 1.5", callback_data="filter:market:HOME_OVER15"),
+            InlineKeyboardButton(text="ИТБ1 2.5", callback_data="filter:market:HOME_OVER25"),
         ],
-        [InlineKeyboardButton(text="« Назад", callback_data="menu:back")],
-    ])
+        [
+            InlineKeyboardButton(text="ИТБ2 0.5", callback_data="filter:market:AWAY_OVER05"),
+            InlineKeyboardButton(text="ИТБ2 1.5", callback_data="filter:market:AWAY_OVER15"),
+            InlineKeyboardButton(text="ИТБ2 2.5", callback_data="filter:market:AWAY_OVER25"),
+        ],
+    ]
+    type_row = [
+        InlineKeyboardButton(text="🎯 Только VALUE", callback_data="filter:type:VALUE"),
+        InlineKeyboardButton(text="🤖 Все", callback_data="filter:type:ALL"),
+    ]
+    back_row = [InlineKeyboardButton(text="« Назад", callback_data="menu:back")]
+    return InlineKeyboardMarkup(
+        inline_keyboard=[*league_rows, *market_rows, type_row, back_row]
+    )

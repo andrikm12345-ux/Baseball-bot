@@ -81,11 +81,31 @@ def train_all(features_df: pd.DataFrame) -> Dict[str, Any]:
     joblib.dump({"model": m_btts, "features": FEATURE_COLUMNS}, p)
     paths["BTTS"] = p
 
+    itb_models: Dict[str, Any] = {}
+    itb_briers: Dict[str, float] = {}
+    for col, label in [
+        ("home_over05", "HOME_OVER05"),
+        ("home_over15", "HOME_OVER15"),
+        ("home_over25", "HOME_OVER25"),
+        ("away_over05", "AWAY_OVER05"),
+        ("away_over15", "AWAY_OVER15"),
+        ("away_over25", "AWAY_OVER25"),
+    ]:
+        y = features_df[col].astype(int).values
+        logger.info(f"Training {label} on {len(X)} rows")
+        m = _train_one(X, y, multiclass=False, name=label)
+        p = MODELS_DIR / f"model_{col}.joblib"
+        joblib.dump({"model": m, "features": FEATURE_COLUMNS}, p)
+        paths[label] = p
+        itb_models[label] = m
+        itb_briers[f"{col}_brier"] = float(brier_score_loss(y, m.predict_proba(X)[:, 1]))
+
     metrics_inn = {
         "n_train": len(X),
         "1x2_logloss": float(log_loss(y_1x2, m_1x2.predict_proba(X), labels=[0, 1, 2])),
         "ou_brier": float(brier_score_loss(y_ou, m_ou.predict_proba(X)[:, 1])),
         "btts_brier": float(brier_score_loss(y_btts, m_btts.predict_proba(X)[:, 1])),
+        **itb_briers,
     }
     walk = evaluate_walk_forward(features_df)
 
@@ -108,9 +128,9 @@ def train_all(features_df: pd.DataFrame) -> Dict[str, Any]:
         except Exception:
             prev = {}
     diff = {
-        "1x2_logloss": metrics_inn["1x2_logloss"] - prev.get("1x2_logloss", metrics_inn["1x2_logloss"]),
-        "ou_brier": metrics_inn["ou_brier"] - prev.get("ou_brier", metrics_inn["ou_brier"]),
-        "btts_brier": metrics_inn["btts_brier"] - prev.get("btts_brier", metrics_inn["btts_brier"]),
+        k: metrics_inn[k] - prev.get(k, metrics_inn[k])
+        for k in metrics_inn
+        if k != "n_train" and isinstance(metrics_inn[k], float)
     }
     try:
         last_path.write_text(json.dumps(metrics_inn, indent=2))

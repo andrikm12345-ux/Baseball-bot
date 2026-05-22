@@ -12,11 +12,20 @@ from src.config import MODELS_DIR
 from src.data.features import FEATURE_COLUMNS
 
 
+_ITB_COLS = [
+    "home_over05", "home_over15", "home_over25",
+    "away_over05", "away_over15", "away_over25",
+]
+
+
 class Predictor:
     def __init__(self) -> None:
         self.m_1x2 = self._load(MODELS_DIR / "model_1x2.joblib")
         self.m_ou = self._load(MODELS_DIR / "model_ou25.joblib")
         self.m_btts = self._load(MODELS_DIR / "model_btts.joblib")
+        self.m_itb: Dict[str, Optional[dict]] = {
+            col: self._load(MODELS_DIR / f"model_{col}.joblib") for col in _ITB_COLS
+        }
 
     @staticmethod
     def _load(path: Path) -> Optional[dict]:
@@ -49,4 +58,9 @@ class Predictor:
         out["p_away"] = p_1x2[:, 2]
         out["p_over25"] = p_ou
         out["p_btts"] = p_btts
+        for col, m in self.m_itb.items():
+            if m is None:
+                out[f"p_{col}"] = np.nan
+            else:
+                out[f"p_{col}"] = m["model"].predict_proba(X)[:, 1]
         return out

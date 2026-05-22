@@ -37,6 +37,8 @@ _PROMPT = """Ты — элитный футбольный аналитик. 15+ 
 ДАННЫЕ ОТ ML-МОДЕЛИ (XGBoost):
 P(дом) = {p_home:.0%}, P(ничья) = {p_draw:.0%}, P(гости) = {p_away:.0%}
 P(тотал>2.5) = {p_over25:.0%}, P(обе забьют) = {p_btts:.0%}
+P(дом забьёт >0.5/1.5/2.5) = {p_home_over05:.0%} / {p_home_over15:.0%} / {p_home_over25:.0%}
+P(гости забьют >0.5/1.5/2.5) = {p_away_over05:.0%} / {p_away_over15:.0%} / {p_away_over25:.0%}
 
 ИСТОРИЧЕСКИЙ КОНТЕКСТ:
 Elo {home_elo:.0f} vs {away_elo:.0f}
@@ -45,10 +47,10 @@ Elo {home_elo:.0f} vs {away_elo:.0f}
 СВЕЖИЕ ДАННЫЕ ИЗ СЕТИ:
 {web_block}
 
-ЗАДАЧА: пройди все 7 ступеней мысленно. Сформируй СВОИ независимые вероятности на 5 рынках. Если данных мало — пометь предположения, но не уходи в фантазии.
+ЗАДАЧА: пройди все 7 ступеней мысленно. Сформируй СВОИ независимые вероятности на 11 рынках. Если данных мало — пометь предположения, но не уходи в фантазии.
 
 Верни СТРОГО JSON, без markdown:
-{{"p_home": float, "p_draw": float, "p_away": float, "p_over25": float, "p_btts": float, "reasoning": "1-2 предложения с главным расхождением"}}"""
+{{"p_home": float, "p_draw": float, "p_away": float, "p_over25": float, "p_btts": float, "p_home_over05": float, "p_home_over15": float, "p_home_over25": float, "p_away_over05": float, "p_away_over15": float, "p_away_over25": float, "reasoning": "1-2 предложения с главным расхождением"}}"""
 
 
 def _format_web(results: list[dict]) -> str:
@@ -103,6 +105,15 @@ def _validate_probs(d: dict) -> bool:
     d["p_home"] = d["p_home"] / s
     d["p_draw"] = d["p_draw"] / s
     d["p_away"] = d["p_away"] / s
+    # ITB probs are optional; if present, clamp to [0,1]; otherwise drop.
+    for key in (
+        "p_home_over05", "p_home_over15", "p_home_over25",
+        "p_away_over05", "p_away_over15", "p_away_over25",
+    ):
+        v = d.get(key)
+        if isinstance(v, (int, float)) and 0 <= v <= 1:
+            continue
+        d.pop(key, None)
     return True
 
 
@@ -133,6 +144,12 @@ async def ai_predict(
         p_away=ml_probs.get("p_away", 0.33),
         p_over25=ml_probs.get("p_over25", 0.5),
         p_btts=ml_probs.get("p_btts", 0.5),
+        p_home_over05=ml_probs.get("p_home_over05", 0.7),
+        p_home_over15=ml_probs.get("p_home_over15", 0.4),
+        p_home_over25=ml_probs.get("p_home_over25", 0.2),
+        p_away_over05=ml_probs.get("p_away_over05", 0.6),
+        p_away_over15=ml_probs.get("p_away_over15", 0.3),
+        p_away_over25=ml_probs.get("p_away_over25", 0.15),
         home_elo=features.get("home_elo", 1500),
         away_elo=features.get("away_elo", 1500),
         home_form=features.get("home_form_pts", 1.5),
@@ -140,7 +157,7 @@ async def ai_predict(
         web_block=_format_web(web_results),
     )
 
-    raw = await call_llm(prompt, max_tokens=600)
+    raw = await call_llm(prompt, max_tokens=900)
     if not raw:
         logger.warning(f"ai_predict({match_id}): empty LLM response")
         return None

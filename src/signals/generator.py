@@ -68,9 +68,19 @@ def _book_odds(row: pd.Series, market: str, pick: str) -> Optional[float]:
     return None
 
 
+_ITB_MARKETS = [
+    ("HOME_OVER05", "p_home_over05"),
+    ("HOME_OVER15", "p_home_over15"),
+    ("HOME_OVER25", "p_home_over25"),
+    ("AWAY_OVER05", "p_away_over05"),
+    ("AWAY_OVER15", "p_away_over15"),
+    ("AWAY_OVER25", "p_away_over25"),
+]
+
+
 def generate(predictions_with_odds: pd.DataFrame) -> List[Signal]:
     """Predictions df expects: match_id, p_home, p_draw, p_away, p_over25, p_btts,
-    plus optional odds_* columns from a bookmaker feed."""
+    plus optional odds_* columns from a bookmaker feed and optional p_*_over* ITB probs."""
     out: List[Signal] = []
     for _, row in predictions_with_odds.iterrows():
         # 1X2
@@ -84,6 +94,14 @@ def generate(predictions_with_odds: pd.DataFrame) -> List[Signal]:
         bt_pick = "YES" if row["p_btts"] >= 0.5 else "NO"
         bt_prob = row["p_btts"] if bt_pick == "YES" else 1 - row["p_btts"]
         out.extend(_make_signal(row, "BTTS", bt_pick, bt_prob))
+        # ITB (individual team totals — model-only, no bookmaker odds available)
+        for market, col in _ITB_MARKETS:
+            if col not in row or pd.isna(row[col]):
+                continue
+            p = float(row[col])
+            pick = "OVER" if p >= 0.5 else "UNDER"
+            prob = p if pick == "OVER" else 1 - p
+            out.extend(_make_signal(row, market, pick, prob))
     return out
 
 

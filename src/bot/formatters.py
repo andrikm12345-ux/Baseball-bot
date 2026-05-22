@@ -7,7 +7,17 @@ from src.data.database import Match, Signal, Team
 from src.signals.tracker import RoiStats
 
 
-_MARKET_LABEL = {"1X2": "Исход", "OU25": "Тотал 2.5", "BTTS": "Обе забьют"}
+_MARKET_LABEL = {
+    "1X2": "Исход",
+    "OU25": "Тотал 2.5",
+    "BTTS": "Обе забьют",
+    "HOME_OVER05": "ИТБ1 0.5",
+    "HOME_OVER15": "ИТБ1 1.5",
+    "HOME_OVER25": "ИТБ1 2.5",
+    "AWAY_OVER05": "ИТБ2 0.5",
+    "AWAY_OVER15": "ИТБ2 1.5",
+    "AWAY_OVER25": "ИТБ2 2.5",
+}
 _PICK_LABEL = {
     "HOME": "П1", "DRAW": "X", "AWAY": "П2",
     "OVER": "Б", "UNDER": "М",
