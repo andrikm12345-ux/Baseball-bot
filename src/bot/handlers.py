@@ -14,7 +14,7 @@ from loguru import logger
 from sqlalchemy import and_, select
 
 from src.bot.access import is_allowed
-from src.bot.formatters import HELP, WELCOME, format_roi, format_signal
+from src.bot.formatters import HELP, WELCOME, format_roi, format_signal, format_signal_short
 from src.bot.keyboards import admin_menu, filters_menu, main_menu
 from src.config import settings
 from src.data.database import Match, SessionLocal, Signal, Subscriber, Team
@@ -412,7 +412,11 @@ async def _send_today(msg: Message) -> None:
             h = await session.get(Team, m.home_team_id)
             a = await session.get(Team, m.away_team_id)
             t = m.utc_date.strftime("%H:%M")
+            sigs = (await session.execute(
+                select(Signal).where(Signal.match_id == m.id)
+            )).scalars().all()
             lines.append(f"• {t} <i>{m.competition}</i> — {h.name} vs {a.name}")
+            lines.append(f"   {format_signal_short(sigs)}")
     await msg.answer("\n".join(lines), parse_mode="HTML")
 
 

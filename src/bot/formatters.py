@@ -40,6 +40,21 @@ def format_signal(
     return "\n".join(lines)
 
 
+def format_signal_short(sigs: list[Signal]) -> str:
+    if not sigs:
+        return "⚪ нет сигнала"
+    value_sigs = [s for s in sigs if s.book_odds and s.book_odds > 1.0]
+    if value_sigs:
+        best = max(value_sigs, key=lambda s: s.edge)
+        market = _MARKET_LABEL.get(best.market, best.market)
+        pick = _PICK_LABEL.get(best.pick, best.pick)
+        return f"🎯 {market} {pick} · edge {best.edge*100:.0f}% · кф {best.book_odds:.2f}"
+    best = max(sigs, key=lambda s: s.confidence)
+    market = _MARKET_LABEL.get(best.market, best.market)
+    pick = _PICK_LABEL.get(best.pick, best.pick)
+    return f"🤖 {market} {pick} · уверенность {best.confidence*100:.0f}%"
+
+
 def format_roi(stats: RoiStats, title: str = "ROI") -> str:
     if stats.n_settled == 0:
         return f"<b>{title}</b>\nЕщё нет рассчитанных ставок."
