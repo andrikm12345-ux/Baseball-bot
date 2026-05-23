@@ -97,6 +97,7 @@ class Subscriber(Base):
     username: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     subscribed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    notifications_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
 class Setting(Base):
@@ -143,3 +144,21 @@ async def init_db() -> None:
             ))
         except Exception as e:
             logger.warning(f"is_ai_ensemble column migration skipped: {e}")
+        try:
+            await conn.execute(text(
+                "ALTER TABLE subscribers "
+                "ADD COLUMN IF NOT EXISTS notifications_enabled BOOLEAN NOT NULL DEFAULT TRUE"
+            ))
+        except Exception as e:
+            logger.warning(f"notifications_enabled column migration skipped: {e}")
+        try:
+            # One-time amnesty for users kicked by the old buggy unsubscribe flow:
+            # restore access, keep notifications off so we don't spam them unprompted.
+            result = await conn.execute(text(
+                "UPDATE subscribers SET active = TRUE, notifications_enabled = FALSE "
+                "WHERE active = FALSE"
+            ))
+            if result.rowcount:
+                logger.warning(f"Amnesty: restored access for {result.rowcount} users (notifications off)")
+        except Exception as e:
+            logger.warning(f"amnesty UPDATE skipped: {e}")

@@ -473,11 +473,14 @@ async def cb_menu(q: CallbackQuery) -> None:
     elif action == "subscribe":
         await _subscribe(q.message.chat.id, q.from_user.username)
         ai_on = await get_bool("ai_ensemble_enabled", False)
-        await q.message.answer("✅ Подписка активна.", reply_markup=main_menu(True, ai_on))
+        await q.message.answer("🔔 Уведомления включены.", reply_markup=main_menu(True, ai_on))
     elif action == "unsubscribe":
         await _unsubscribe(q.message.chat.id)
         ai_on = await get_bool("ai_ensemble_enabled", False)
-        await q.message.answer("👋 Отписан.", reply_markup=main_menu(False, ai_on))
+        await q.message.answer(
+            "🔕 Уведомления отключены. Доступ к боту сохранён — заходи в любое время.",
+            reply_markup=main_menu(False, ai_on),
+        )
     elif action == "ai_info":
         ai_on = await get_bool("ai_ensemble_enabled", False)
         status = "🟢 ВКЛ" if ai_on else "🔴 ВЫКЛ"
@@ -510,26 +513,32 @@ async def cb_filter(q: CallbackQuery) -> None:
 
 
 async def _is_subscribed(chat_id: int) -> bool:
+    """True if user has notifications enabled (drives the menu button state)."""
     async with SessionLocal() as session:
         sub = await session.get(Subscriber, chat_id)
-    return bool(sub and sub.active)
+    return bool(sub and sub.notifications_enabled)
 
 
 async def _subscribe(chat_id: int, username: Optional[str]) -> None:
+    """Re-enable notifications. Does NOT grant access — only admin can do that."""
     async with SessionLocal() as session:
         sub = await session.get(Subscriber, chat_id)
         if sub is None:
-            session.add(Subscriber(chat_id=chat_id, username=username, active=True))
+            session.add(Subscriber(
+                chat_id=chat_id, username=username,
+                active=True, notifications_enabled=True,
+            ))
         else:
-            sub.active = True
+            sub.notifications_enabled = True
         await session.commit()
 
 
 async def _unsubscribe(chat_id: int) -> None:
+    """Pause notifications. Access stays intact."""
     async with SessionLocal() as session:
         sub = await session.get(Subscriber, chat_id)
         if sub:
-            sub.active = False
+            sub.notifications_enabled = False
             await session.commit()
 
 
@@ -664,7 +673,10 @@ async def broadcast_signal(bot: Bot, text: str) -> int:
     sent = 0
     async with SessionLocal() as session:
         subs = (await session.execute(
-            select(Subscriber).where(Subscriber.active.is_(True))
+            select(Subscriber).where(
+                Subscriber.active.is_(True),
+                Subscriber.notifications_enabled.is_(True),
+            )
         )).scalars().all()
     if not subs:
         logger.warning("broadcast_signal: no active subscribers — nobody to send to")
@@ -713,7 +725,10 @@ async def broadcast_digest(bot: Bot) -> int:
     sent = 0
     async with SessionLocal() as session:
         subs = (await session.execute(
-            select(Subscriber).where(Subscriber.active.is_(True))
+            select(Subscriber).where(
+                Subscriber.active.is_(True),
+                Subscriber.notifications_enabled.is_(True),
+            )
         )).scalars().all()
     for s in subs:
         try:

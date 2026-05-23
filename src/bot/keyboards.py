@@ -9,7 +9,7 @@ from aiogram.types import (
 
 
 def main_menu(subscribed: bool = False, ai_enabled: bool = False) -> InlineKeyboardMarkup:
-    sub_text = "🔔 Подписка: АКТИВНА" if subscribed else "🔕 Подписаться"
+    sub_text = "🔔 Уведомления: ВКЛ" if subscribed else "🔕 Уведомления: ВЫКЛ"
     sub_data = "menu:unsubscribe" if subscribed else "menu:subscribe"
     ai_dot = "🟢" if ai_enabled else "🔴"
     return InlineKeyboardMarkup(inline_keyboard=[
