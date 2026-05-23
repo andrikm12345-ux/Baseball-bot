@@ -15,8 +15,45 @@ from src.ai.commentary import call_llm
 from src.data.web_search import tavily_search
 
 
-_CACHE_TTL_SEC = 6 * 3600
+_CACHE_TTL_SEC = 12 * 3600
 _cache: Dict[int, tuple[float, dict]] = {}
+
+
+async def _db_cache_get(match_id: int) -> Optional[dict]:
+    """Return cached AI prediction from DB if not expired."""
+    from datetime import datetime, timedelta
+    from src.data.database import AiPrediction, SessionLocal
+
+    cutoff = datetime.utcnow() - timedelta(seconds=_CACHE_TTL_SEC)
+    try:
+        async with SessionLocal() as session:
+            row = await session.get(AiPrediction, match_id)
+            if row is None or row.created_at < cutoff:
+                return None
+            return json.loads(row.payload)
+    except Exception as e:
+        logger.warning(f"ai db cache read failed for {match_id}: {e}")
+        return None
+
+
+async def _db_cache_put(match_id: int, payload: dict) -> None:
+    from datetime import datetime
+    from src.data.database import AiPrediction, SessionLocal
+
+    try:
+        async with SessionLocal() as session:
+            existing = await session.get(AiPrediction, match_id)
+            data = json.dumps(payload)
+            if existing is None:
+                session.add(AiPrediction(
+                    match_id=match_id, created_at=datetime.utcnow(), payload=data
+                ))
+            else:
+                existing.created_at = datetime.utcnow()
+                existing.payload = data
+            await session.commit()
+    except Exception as e:
+        logger.warning(f"ai db cache write failed for {match_id}: {e}")
 
 
 _PROMPT = """Ты — элитный футбольный аналитик. 15+ лет в лайв-анализе. Глубокое понимание xG (Opta, StatsBomb), математики линий. Ты ищешь РАСХОЖДЕНИЕ между истинной вероятностью и рынком.
@@ -132,6 +169,11 @@ async def ai_predict(
     if cached and now - cached[0] < _CACHE_TTL_SEC:
         return cached[1]
 
+    db_cached = await _db_cache_get(match_id)
+    if db_cached is not None:
+        _cache[match_id] = (now, db_cached)
+        return db_cached
+
     web_results = await tavily_search(
         f"{home} vs {away} team news injuries lineup", days=7
     )
@@ -168,6 +210,7 @@ async def ai_predict(
         return None
 
     _cache[match_id] = (now, parsed)
+    await _db_cache_put(match_id, parsed)
     logger.info(
         f"ai_predict({match_id}): home={parsed['p_home']:.2f} "
         f"draw={parsed['p_draw']:.2f} away={parsed['p_away']:.2f} "

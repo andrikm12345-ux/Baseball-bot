@@ -101,7 +101,12 @@ def generate(predictions_with_odds: pd.DataFrame) -> List[Signal]:
 
 
 def _make_signal(row: pd.Series, market: str, pick: str, prob: float) -> List[Signal]:
-    if prob < settings.min_confidence:
+    # If AI ensemble already weighed in on this match, relax the confidence
+    # floor — we don't want to burn a Claude call and then drop the signal
+    # because the blended probability sits just under the static threshold.
+    ai_applied = bool(row.get("_ai_applied", False))
+    floor = 0.40 if ai_applied else settings.min_confidence
+    if prob < floor:
         return []
     fair = 1.0 / max(prob, 1e-6)
     book = _book_odds(row, market, pick)
@@ -120,8 +125,10 @@ def _make_signal(row: pd.Series, market: str, pick: str, prob: float) -> List[Si
             confidence=float(prob), stake_units=float(round(stake, 2)),
             is_value=True,
         )]
-    # No bookmaker odds — still publish the pick as a "model signal" if confident
-    if prob >= max(settings.min_confidence, 0.60):
+    # No bookmaker odds — still publish the pick as a "model signal" if confident.
+    # AI-vetted matches get the same relaxed floor as the value path.
+    model_floor = floor if ai_applied else max(settings.min_confidence, 0.60)
+    if prob >= model_floor:
         return [Signal(
             match_id=int(row["match_id"]),
             market=market, pick=pick,

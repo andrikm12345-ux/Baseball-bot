@@ -185,6 +185,7 @@ async def generate_and_broadcast(bot) -> int:
     if await get_bool("ai_ensemble_enabled", False):
         preds, ai_match_ids = await _apply_ai_ensemble(preds, feats)
 
+    preds["_ai_applied"] = preds["match_id"].isin(ai_match_ids)
     signals = generate(preds)
     new_rows = await _store_signals(signals, ai_match_ids=ai_match_ids)
     sent = 0
@@ -250,10 +251,24 @@ async def _apply_ai_ensemble(
         return preds, set()
 
     async with SessionLocal() as session:
+        # Skip matches that already have any signal stored — no need to spend
+        # another AI call to re-evaluate something we've already published.
+        existing_rows = (await session.execute(
+            select(SignalRow.match_id)
+            .where(SignalRow.match_id.in_([int(m) for m in candidates["match_id"]]))
+            .distinct()
+        )).scalars().all()
+        already_signaled = {int(m) for m in existing_rows}
+        if already_signaled:
+            logger.info(
+                f"AI ensemble: skipping {len(already_signaled)} match(es) that already have signals"
+            )
         tasks = []
         match_meta = {}
         for _, row in candidates.iterrows():
             mid = int(row["match_id"])
+            if mid in already_signaled:
+                continue
             match = await session.get(Match, mid)
             if not match:
                 continue

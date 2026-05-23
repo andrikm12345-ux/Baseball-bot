@@ -121,6 +121,15 @@ class PendingUser(Base):
     start_count: Mapped[int] = mapped_column(Integer, default=1)
 
 
+class AiPrediction(Base):
+    __tablename__ = "ai_predictions"
+    match_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, index=True
+    )
+    payload: Mapped[str] = mapped_column(String)  # JSON-encoded ai_predict result
+
+
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
