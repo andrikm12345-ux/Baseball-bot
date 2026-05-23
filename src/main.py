@@ -91,9 +91,10 @@ async def main() -> None:
     scheduler = AsyncIOScheduler(timezone=settings.tz)
     # Full pipeline once a day at 04:00 local time
     scheduler.add_job(daily_cycle, CronTrigger(hour=4, minute=0), args=[bot], id="daily")
-    # Refresh upcoming + emit signals every 3 hours to catch late odds/movement
+    # Generate/publish signals every hour for matches kicking off in the next 4
+    # hours, with fresh odds — limits stale-line bait.
     scheduler.add_job(
-        generate_and_broadcast, IntervalTrigger(hours=3), args=[bot], id="signals_loop"
+        generate_and_broadcast, IntervalTrigger(hours=1), args=[bot], id="signals_loop"
     )
     # Settle results every 30 min
     scheduler.add_job(settle_pending, IntervalTrigger(minutes=30), id="settle")
