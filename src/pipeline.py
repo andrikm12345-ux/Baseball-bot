@@ -1,6 +1,7 @@
 """End-to-end pipeline: ingest → features → train → predict → emit signals."""
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from typing import List
 
@@ -8,12 +9,11 @@ import pandas as pd
 from loguru import logger
 from sqlalchemy import select
 
-from src.ai.commentary import generate_commentary
 from src.ai.predictor import ai_predict
 from src.bot.formatters import format_signal
 from src.bot.handlers import broadcast_signal
 from src.config import settings
-from src.data.database import Match, SessionLocal, Signal as SignalRow, Team
+from src.data.database import AiPrediction, Match, SessionLocal, Signal as SignalRow, Team
 from src.data.features import build_features, build_inference_features
 from src.data.football_api import FootballDataClient
 from src.data.ingest import ingest_history, ingest_upcoming
@@ -200,16 +200,13 @@ async def generate_and_broadcast(bot) -> int:
                 home = await session.get(Team, match.home_team_id)
                 away = await session.get(Team, match.away_team_id)
                 ai_comment = None
-                if ai_on:
-                    ai_comment = await generate_commentary(
-                        match_id=row.match_id,
-                        home=home.name, away=away.name,
-                        competition=match.competition,
-                        market=row.market, pick=row.pick,
-                        prob=row.model_prob,
-                        book_odds=row.book_odds, edge=row.edge,
-                        features=feats_by_id.get(row.match_id, {}),
-                    )
+                if ai_on and row.match_id in ai_match_ids:
+                    cached_ai = await session.get(AiPrediction, row.match_id)
+                    if cached_ai:
+                        try:
+                            ai_comment = json.loads(cached_ai.payload).get("reasoning")
+                        except Exception:
+                            ai_comment = None
                     if ai_comment:
                         stored = await session.get(SignalRow, row.id)
                         if stored:
