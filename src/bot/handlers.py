@@ -67,6 +67,7 @@ async def cmd_start(msg: Message) -> None:
 
 async def _track_pending(msg: Message) -> None:
     u = msg.from_user
+    is_new_lead = False
     try:
         async with SessionLocal() as session:
             p = await session.get(PendingUser, msg.chat.id)
@@ -78,6 +79,7 @@ async def _track_pending(msg: Message) -> None:
                     last_name=(u.last_name if u else None),
                     start_count=1,
                 ))
+                is_new_lead = True
             else:
                 p.start_count += 1
                 if u:
@@ -87,6 +89,35 @@ async def _track_pending(msg: Message) -> None:
             await session.commit()
     except Exception as e:
         logger.warning(f"_track_pending failed for {msg.chat.id}: {e}")
+        return
+
+    if is_new_lead:
+        await _notify_admins_new_lead(msg)
+
+
+async def _notify_admins_new_lead(msg: Message) -> None:
+    u = msg.from_user
+    label_parts = []
+    if u and u.username:
+        label_parts.append(f"@{u.username}")
+    full = " ".join(filter(None, [u.first_name if u else None, u.last_name if u else None])).strip()
+    if full:
+        label_parts.append(full)
+    label = " · ".join(label_parts) or "(без имени)"
+    text = (
+        "🆕 <b>Новый лид</b>\n\n"
+        f"{label}\n"
+        f"ID: <code>{msg.chat.id}</code>\n\n"
+        "Открыть доступ — кнопка ниже или <code>/allow {0}</code>".format(msg.chat.id)
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"✅ Одобрить {msg.chat.id}", callback_data=f"approve:{msg.chat.id}")]
+    ])
+    for admin_id in settings.admin_ids:
+        try:
+            await msg.bot.send_message(admin_id, text, parse_mode="HTML", reply_markup=kb)
+        except Exception as e:
+            logger.warning(f"new-lead notify to admin {admin_id} failed: {e}")
 
 
 @router.message(Command("help"))
