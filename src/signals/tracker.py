@@ -69,6 +69,7 @@ async def roi_stats(
     last_n: int | None = None,
     only_value: bool | None = True,
     ai_only: bool | None = None,
+    since: "datetime | None" = None,
 ) -> RoiStats:
     """ROI summary with optional filters.
 
@@ -79,9 +80,13 @@ async def roi_stats(
     ai_only:
       - True  → only signals with is_ai_ensemble=True
       - None  → don't filter
+    since:
+      - datetime → only signals created at or after this UTC moment
     """
     async with SessionLocal() as session:
         q = select(Signal).where(Signal.settled.is_(True)).order_by(Signal.created_at.desc())
+        if since is not None:
+            q = q.where(Signal.created_at >= since)
         if last_n:
             q = q.limit(last_n)
         rows: List[Signal] = list((await session.execute(q)).scalars())

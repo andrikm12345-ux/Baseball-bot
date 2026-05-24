@@ -68,6 +68,37 @@ def format_signal(
     return "\n".join(lines)
 
 
+def format_daily_digest(
+    yesterday: RoiStats, total: RoiStats, date_label: str
+) -> str:
+    """End-of-day broadcast: yesterday's result + running totals."""
+    lines = [
+        f"📊 <b>СВОДКА ЗА {date_label}</b>",
+        "━━━━━━━━━━━━━━━━━━━━━",
+    ]
+    if yesterday.n_settled == 0:
+        lines.append("Вчера закрытых ставок не было.")
+    else:
+        sign = "📈" if yesterday.profit >= 0 else "📉"
+        lines += [
+            f"Ставок: <b>{yesterday.n_settled}</b> · "
+            f"Зашло: <b>{yesterday.n_won}</b> ({yesterday.hit_rate:.0f}%)",
+            f"{sign} ROI: <b>{yesterday.roi:+.2f}%</b> · "
+            f"Прибыль: <b>{yesterday.profit:+.2f} ед.</b>",
+        ]
+    lines += [
+        "",
+        "<b>За всё время:</b>",
+        f"Ставок: <b>{total.n_settled}</b> · "
+        f"Зашло: <b>{total.n_won}</b> ({total.hit_rate:.0f}%)",
+        f"ROI: <b>{total.roi:+.2f}%</b> · "
+        f"Прибыль: <b>{total.profit:+.2f} ед.</b>",
+        "",
+        "<i>Подробности — кнопка «📜 История ставок» в меню.</i>",
+    ]
+    return "\n".join(lines)
+
+
 def format_history(rows: list[tuple[Signal, Match, Team, Team]], limit: int = 20) -> str:
     """Per-signal settled history: outcome, market, pick, odds, score, profit."""
     if not rows:

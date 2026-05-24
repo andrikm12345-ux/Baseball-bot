@@ -17,6 +17,7 @@ from src.data.database import init_db
 from src.pipeline import (
     bootstrap_history,
     daily_cycle,
+    daily_stats_broadcast,
     generate_and_broadcast,
     refresh_upcoming,
     train_models,
@@ -102,6 +103,14 @@ async def main() -> None:
     scheduler.add_job(refresh_upcoming, IntervalTrigger(hours=6), id="refresh_upcoming")
     # Morning digest at 09:00 local time
     scheduler.add_job(broadcast_digest, CronTrigger(hour=9, minute=0), args=[bot], id="digest")
+    # End-of-day stats digest at 04:30 MSK — after daily_cycle (04:00) has
+    # settled yesterday's matches.
+    scheduler.add_job(
+        daily_stats_broadcast,
+        CronTrigger(hour=4, minute=30),
+        args=[bot],
+        id="daily_stats",
+    )
     scheduler.start()
 
     await _on_startup(bot)
