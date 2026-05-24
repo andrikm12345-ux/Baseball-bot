@@ -93,13 +93,21 @@ class FootballDataClient:
         return out
 
     async def fetch_upcoming(self, competition: str, days_ahead: int = 7) -> List[Dict[str, Any]]:
+        """Window from -3 days to +days_ahead, every status.
+
+        We need recently finished matches (to settle signals + grab final scores)
+        as well as upcoming ones. Filtering by SCHEDULED here used to mean that
+        once a match flipped to FINISHED we never re-fetched it, so the local DB
+        row stayed at SCHEDULED with no goals and settle_pending could not settle
+        the related signal.
+        """
         today = datetime.now(timezone.utc).date()
-        date_from = today.isoformat()
         from datetime import timedelta
+        date_from = (today - timedelta(days=3)).isoformat()
         date_to = (today + timedelta(days=days_ahead)).isoformat()
         try:
             return await self.competition_matches(
-                competition, status="SCHEDULED", date_from=date_from, date_to=date_to
+                competition, status=None, date_from=date_from, date_to=date_to
             )
         except Exception as e:
             logger.warning(f"Failed upcoming {competition}: {e}")
