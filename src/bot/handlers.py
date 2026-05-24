@@ -26,7 +26,7 @@ from src.bot.keyboards import admin_menu, filters_menu, main_menu
 from src.config import settings
 from src.data.database import Match, PendingUser, SessionLocal, Signal, Subscriber, Team
 from src.data.settings_store import get_bool, set_bool
-from src.signals.tracker import roi_stats
+from src.signals.tracker import roi_stats, settle_pending
 
 
 class AdminFSM(StatesGroup):
@@ -147,6 +147,97 @@ async def cmd_admin(msg: Message) -> None:
         f"<b>Admin</b>\nПодписчики: {n_subs}\nСигналы в БД: {n_sig}\nМатчи в БД: {n_match}",
         parse_mode="HTML",
     )
+
+
+@router.message(Command("diag"))
+async def cmd_diag(msg: Message) -> None:
+    """Admin: why are signals not settling. Also force-runs settle_pending."""
+    if not msg.from_user or msg.from_user.id not in settings.admin_ids:
+        return
+
+    from sqlalchemy import func
+    async with SessionLocal() as session:
+        n_total = (await session.execute(
+            select(func.count()).select_from(Signal)
+        )).scalar_one()
+        n_settled = (await session.execute(
+            select(func.count()).select_from(Signal).where(Signal.settled.is_(True))
+        )).scalar_one()
+        n_won = (await session.execute(
+            select(func.count()).select_from(Signal).where(Signal.won.is_(True))
+        )).scalar_one()
+        n_ai = (await session.execute(
+            select(func.count()).select_from(Signal).where(Signal.is_ai_ensemble.is_(True))
+        )).scalar_one()
+        n_value = (await session.execute(
+            select(func.count()).select_from(Signal).where(Signal.book_odds > 1.0)
+        )).scalar_one()
+
+        # Unsettled breakdown
+        unsettled_rows = (await session.execute(
+            select(Signal, Match)
+            .join(Match, Match.id == Signal.match_id, isouter=True)
+            .where(Signal.settled.is_(False))
+        )).all()
+
+        no_match = sum(1 for s, m in unsettled_rows if m is None)
+        not_finished = sum(
+            1 for s, m in unsettled_rows
+            if m is not None and m.status != "FINISHED"
+        )
+        no_goals = sum(
+            1 for s, m in unsettled_rows
+            if m is not None and m.status == "FINISHED"
+            and (m.home_goals is None or m.away_goals is None)
+        )
+        ready = sum(
+            1 for s, m in unsettled_rows
+            if m is not None and m.status == "FINISHED"
+            and m.home_goals is not None and m.away_goals is not None
+        )
+
+        # Sample of unsettled rows for context
+        sample_lines = []
+        for s, m in unsettled_rows[:5]:
+            if m is None:
+                reason = "матч не в БД"
+                meta = f"match_id={s.match_id}"
+            elif m.status != "FINISHED":
+                reason = f"status={m.status}"
+                meta = f"kickoff={m.utc_date.strftime('%d.%m %H:%M')}"
+            elif m.home_goals is None or m.away_goals is None:
+                reason = "FINISHED без счёта"
+                meta = f"kickoff={m.utc_date.strftime('%d.%m %H:%M')}"
+            else:
+                reason = "готов к settle"
+                meta = f"{m.home_goals}:{m.away_goals}"
+            sample_lines.append(f"  • sig#{s.id} {s.market}/{s.pick} — {reason} ({meta})")
+
+    # If there is anything ready — fire settle right now
+    forced_settled = 0
+    if ready:
+        forced_settled = await settle_pending()
+
+    text = [
+        "🩺 <b>ДИАГНОСТИКА</b>",
+        "━━━━━━━━━━━━━━━━━━━━━",
+        f"Всего сигналов: <b>{n_total}</b>",
+        f"  • settled: <b>{n_settled}</b> (won: {n_won})",
+        f"  • unsettled: <b>{n_total - n_settled}</b>",
+        f"  • VALUE (с кэфом): <b>{n_value}</b>",
+        f"  • с участием AI: <b>{n_ai}</b>",
+        "",
+        "<b>Почему не settled:</b>",
+        f"  • матча нет в БД: <b>{no_match}</b>",
+        f"  • матч не FINISHED: <b>{not_finished}</b>",
+        f"  • FINISHED, но счёт NULL: <b>{no_goals}</b>",
+        f"  • готов к settle прямо сейчас: <b>{ready}</b>",
+    ]
+    if sample_lines:
+        text += ["", "<b>Примеры (5 первых):</b>", *sample_lines]
+    if ready:
+        text += ["", f"⚙ Принудительный settle отработал: <b>{forced_settled}</b> закрыто."]
+    await msg.answer("\n".join(text), parse_mode="HTML")
 
 
 @router.message(Command("allow"))
