@@ -99,6 +99,31 @@ DISABLED_MARKETS: set[str] = {
 }
 
 
+def _best_signal_per_match(signals: List["Signal"]) -> List["Signal"]:
+    """Keep only the strongest pick per match.
+
+    Ranking: VALUE first (book_odds > 1), then by edge desc, then by confidence
+    desc. Stops the bot from publishing two picks on the same fixture which
+    feels like 'placing two bets on one game'.
+    """
+    from src.signals.generator import Signal as Sig
+
+    by_match: dict[int, Sig] = {}
+    for s in signals:
+        cur = by_match.get(s.match_id)
+        if cur is None:
+            by_match[s.match_id] = s
+            continue
+
+        def score(x: Sig) -> tuple[int, float, float]:
+            is_value = 1 if (x.book_odds and x.book_odds > 1.0) else 0
+            return (is_value, x.edge or 0.0, x.confidence or 0.0)
+
+        if score(s) > score(cur):
+            by_match[s.match_id] = s
+    return list(by_match.values())
+
+
 async def _store_signals(
     signals: List[Signal], ai_match_ids: set[int] | None = None
 ) -> List[SignalRow]:
@@ -109,13 +134,13 @@ async def _store_signals(
         for s in signals:
             if s.market in DISABLED_MARKETS:
                 continue
+            # Hard dedup: one signal per match across the whole signals table.
+            # The earlier (match, market, pick) tuple let us publish two bets
+            # on the same fixture (e.g. 1X2 first hour, OU25 the next) which
+            # the user pushed back on as 'placing two bets on one game'.
             exists = (await session.execute(
-                select(SignalRow).where(
-                    SignalRow.match_id == s.match_id,
-                    SignalRow.market == s.market,
-                    SignalRow.pick == s.pick,
-                )
-            )).scalar_one_or_none()
+                select(SignalRow).where(SignalRow.match_id == s.match_id)
+            )).first()
             if exists is not None:
                 continue
             row = SignalRow(
@@ -187,6 +212,7 @@ async def generate_and_broadcast(bot) -> int:
 
     preds["_ai_applied"] = preds["match_id"].isin(ai_match_ids)
     signals = generate(preds)
+    signals = _best_signal_per_match(signals)
     new_rows = await _store_signals(signals, ai_match_ids=ai_match_ids)
     sent = 0
     ai_on = await get_bool("ai_ensemble_enabled", False)
