@@ -818,23 +818,35 @@ async def broadcast_signal(bot: Bot, text: str, respect_notifications: bool = Tr
 
 
 async def broadcast_digest(bot: Bot) -> int:
-    """Morning digest: list of today's signals (top 5 by edge)."""
-    from src.bot.formatters import msk_now, MSK_OFFSET
+    """Morning digest: top 5 fresh signals for matches in the next 4 hours.
+
+    The 4-hour cap matches generate_and_broadcast's publication window, so we
+    never surface a signal whose odds were captured many hours ago — the line
+    by then has usually drifted enough to flip edge negative.
+    """
     now = datetime.utcnow()
-    today_msk = msk_now().date()
-    end_msk = datetime.combine(today_msk, datetime.min.time()) + timedelta(days=1)
-    end_of_day = end_msk - MSK_OFFSET  # back to UTC for DB
+    horizon = now + timedelta(hours=4)
+    fresh_cutoff = now - timedelta(hours=4)  # odds captured at most 4 hours ago
     async with SessionLocal() as session:
         rows = (await session.execute(
             select(Signal, Match)
             .join(Match, Match.id == Signal.match_id)
-            .where(and_(Match.utc_date >= now, Match.utc_date <= end_of_day))
+            .where(and_(
+                Match.utc_date >= now,
+                Match.utc_date <= horizon,
+                Signal.created_at >= fresh_cutoff,
+            ))
             .order_by(Signal.edge.desc(), Signal.confidence.desc())
             .limit(5)
         )).all()
         if not rows:
             return 0
-        lines = [f"☀️ <b>Утренний дайджест — {today_msk.strftime('%d.%m.%Y')}</b>", ""]
+        from src.bot.formatters import msk_now
+        lines = [
+            f"☀️ <b>Утренний дайджест — {msk_now().strftime('%d.%m.%Y')}</b>",
+            "<i>Ближайшие 4 часа · топ-5 по edge</i>",
+            "",
+        ]
         for sig, m in rows:
             h = await session.get(Team, m.home_team_id)
             a = await session.get(Team, m.away_team_id)

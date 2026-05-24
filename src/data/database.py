@@ -176,3 +176,23 @@ async def init_db() -> None:
                 )
         except Exception as e:
             logger.warning(f"commentary cleanup skipped: {e}")
+        try:
+            # Drop unsettled signals captured under the old 7-day horizon: those
+            # were generated up to a week before kickoff with frozen odds, so by
+            # match time the line had usually drifted enough to flip edge.
+            # Heuristic: signal.created_at more than 4h before match.utc_date.
+            # Only touches unsettled rows — settled ones stay for ROI accuracy.
+            result = await conn.execute(text(
+                "DELETE FROM signals WHERE id IN ("
+                "  SELECT s.id FROM signals s "
+                "  JOIN matches m ON m.id = s.match_id "
+                "  WHERE s.settled = FALSE "
+                "  AND m.utc_date - s.created_at > INTERVAL '4 hours'"
+                ")"
+            ))
+            if result.rowcount:
+                logger.warning(
+                    f"Purged {result.rowcount} stale unsettled signals (kickoff > 4h after creation)"
+                )
+        except Exception as e:
+            logger.warning(f"stale-signal purge skipped: {e}")
