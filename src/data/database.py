@@ -162,3 +162,17 @@ async def init_db() -> None:
                 logger.warning(f"Amnesty: restored access for {result.rowcount} users (notifications off)")
         except Exception as e:
             logger.warning(f"amnesty UPDATE skipped: {e}")
+        try:
+            # Drop legacy commentary from non-AI signals: generate_commentary
+            # used to attach text to every signal, leaving 🧠-looking commentary
+            # on plain MODEL/VALUE rows. Idempotent on later boots.
+            result = await conn.execute(text(
+                "UPDATE signals SET commentary = NULL "
+                "WHERE commentary IS NOT NULL AND is_ai_ensemble = FALSE"
+            ))
+            if result.rowcount:
+                logger.warning(
+                    f"Stripped stale commentary from {result.rowcount} non-AI signals"
+                )
+        except Exception as e:
+            logger.warning(f"commentary cleanup skipped: {e}")

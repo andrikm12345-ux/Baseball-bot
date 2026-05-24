@@ -671,8 +671,9 @@ async def _send_signals(
         for sig, match in pairs:
             home = await session.get(Team, match.home_team_id)
             away = await session.get(Team, match.away_team_id)
+            ai_text = sig.commentary if getattr(sig, "is_ai_ensemble", False) else None
             await msg.answer(
-                format_signal(sig, match, home, away, sig.commentary),
+                format_signal(sig, match, home, away, ai_text),
                 parse_mode="HTML",
             )
 
