@@ -22,7 +22,7 @@ from sqlalchemy import and_, select
 
 from src.bot.access import is_allowed
 from src.bot.formatters import HELP, WELCOME, fmt_msk, format_roi, format_signal, format_signal_short, format_stats_table
-from src.bot.keyboards import admin_menu, filters_menu, main_menu
+from src.bot.keyboards import admin_menu, filters_menu, main_menu, user_menu
 from src.config import settings
 from src.data.database import Match, PendingUser, SessionLocal, Signal, Subscriber, Team
 from src.data.settings_store import get_bool, set_bool
@@ -51,10 +51,10 @@ async def cmd_start(msg: Message) -> None:
             parse_mode="HTML",
             reply_markup=admin_menu(ai_on),
         )
-        await msg.answer(WELCOME, parse_mode="HTML", reply_markup=main_menu(sub_active, ai_on))
+        await msg.answer(WELCOME, parse_mode="HTML")
         return
     if await is_allowed(msg.chat.id):
-        await msg.answer(WELCOME, parse_mode="HTML", reply_markup=main_menu(sub_active, ai_on))
+        await msg.answer(WELCOME, parse_mode="HTML", reply_markup=user_menu(sub_active))
         return
     locked = (
         "🔒 Доступ ограничен.\n\n"
@@ -96,9 +96,12 @@ async def cmd_help(msg: Message) -> None:
 
 @router.message(Command("menu"))
 async def cmd_menu(msg: Message) -> None:
+    if msg.from_user and msg.from_user.id in settings.admin_ids:
+        ai_on = await get_bool("ai_ensemble_enabled", False)
+        await msg.answer("Меню:", reply_markup=admin_menu(ai_on))
+        return
     sub_active = await _is_subscribed(msg.chat.id)
-    ai_on = await get_bool("ai_ensemble_enabled", False)
-    await msg.answer("Меню:", reply_markup=main_menu(sub_active, ai_on))
+    await msg.answer("Меню:", reply_markup=user_menu(sub_active))
 
 
 @router.message(Command("subscribe"))
@@ -392,16 +395,46 @@ async def btn_stats(msg: Message) -> None:
 
 @router.message(F.text == "🎯 Сигналы")
 async def btn_signals(msg: Message) -> None:
-    if not _is_admin(msg):
-        return
     await _send_signals(msg, league=None, market=None, only_value=False)
 
 
 @router.message(F.text == "📅 Сегодня")
 async def btn_today(msg: Message) -> None:
-    if not _is_admin(msg):
-        return
     await _send_today(msg)
+
+
+@router.message(F.text == "📈 ROI")
+async def btn_roi(msg: Message) -> None:
+    await _send_stats(msg)
+
+
+@router.message(F.text == "📊 График")
+async def btn_chart(msg: Message) -> None:
+    await _send_chart(msg)
+
+
+@router.message(F.text == "📜 История")
+async def btn_history(msg: Message) -> None:
+    await _send_history(msg)
+
+
+@router.message(F.text == "🔧 Фильтры")
+async def btn_filters(msg: Message) -> None:
+    await msg.answer("Выбери фильтр:", reply_markup=filters_menu())
+
+
+@router.message(F.text.regexp(r"^🔔 Уведомления|^🔕 Уведомления"))
+async def btn_notifications_toggle(msg: Message) -> None:
+    currently_on = await _is_subscribed(msg.chat.id)
+    if currently_on:
+        await _unsubscribe(msg.chat.id)
+        await msg.answer(
+            "🔕 Уведомления отключены. Доступ к боту сохранён — заходи в любое время.",
+            reply_markup=user_menu(notifications_on=False),
+        )
+    else:
+        await _subscribe(msg.chat.id, msg.from_user.username if msg.from_user else None)
+        await msg.answer("🔔 Уведомления включены.", reply_markup=user_menu(notifications_on=True))
 
 
 @router.message(F.text == "📥 Лиды")

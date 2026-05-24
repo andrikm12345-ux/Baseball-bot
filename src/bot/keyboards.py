@@ -30,6 +30,21 @@ def main_menu(subscribed: bool = False, ai_enabled: bool = False) -> InlineKeybo
     ])
 
 
+def user_menu(notifications_on: bool = True) -> ReplyKeyboardMarkup:
+    """Persistent bottom keyboard for regular subscribers."""
+    notif_label = "🔔 Уведомления: ВКЛ" if notifications_on else "🔕 Уведомления: ВЫКЛ"
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🎯 Сигналы"),  KeyboardButton(text="📅 Сегодня")],
+            [KeyboardButton(text="📈 ROI"),       KeyboardButton(text="📊 График")],
+            [KeyboardButton(text="📜 История"),   KeyboardButton(text="🔧 Фильтры")],
+            [KeyboardButton(text=notif_label)],
+        ],
+        resize_keyboard=True,
+        persistent=True,
+    )
+
+
 def admin_menu(ai_enabled: bool = False) -> ReplyKeyboardMarkup:
     ai_label = "🧠 AI: 🟢 ВКЛ" if ai_enabled else "🧠 AI: 🔴 ВЫКЛ"
     return ReplyKeyboardMarkup(
