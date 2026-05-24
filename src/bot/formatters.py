@@ -69,22 +69,40 @@ def format_signal(
 
 
 def format_daily_digest(
-    yesterday: RoiStats, total: RoiStats, date_label: str
+    *,
+    yesterday_total: RoiStats,
+    yesterday_model: RoiStats,
+    yesterday_value: RoiStats,
+    yesterday_ai: RoiStats,
+    total: RoiStats,
+    date_label: str,
 ) -> str:
-    """End-of-day broadcast: yesterday's result + running totals."""
+    """End-of-day broadcast: yesterday's result split by signal type + running totals."""
+
+    def _block(label: str, s: RoiStats) -> str:
+        if s.n_settled == 0:
+            return f"{label} — нет ставок"
+        sign = "📈" if s.profit >= 0 else "📉"
+        return (
+            f"{label}: <b>{s.n_settled}</b> ставок · "
+            f"зашло <b>{s.n_won}</b> ({s.hit_rate:.0f}%) · "
+            f"{sign} ROI <b>{s.roi:+.2f}%</b> · "
+            f"<b>{s.profit:+.2f} ед.</b>"
+        )
+
     lines = [
         f"📊 <b>СВОДКА ЗА {date_label}</b>",
         "━━━━━━━━━━━━━━━━━━━━━",
     ]
-    if yesterday.n_settled == 0:
+    if yesterday_total.n_settled == 0:
         lines.append("Вчера закрытых ставок не было.")
     else:
-        sign = "📈" if yesterday.profit >= 0 else "📉"
         lines += [
-            f"Ставок: <b>{yesterday.n_settled}</b> · "
-            f"Зашло: <b>{yesterday.n_won}</b> ({yesterday.hit_rate:.0f}%)",
-            f"{sign} ROI: <b>{yesterday.roi:+.2f}%</b> · "
-            f"Прибыль: <b>{yesterday.profit:+.2f} ед.</b>",
+            _block("🤖 MODEL", yesterday_model),
+            _block("🎯 VALUE", yesterday_value),
+            _block("🧠 AI    ", yesterday_ai),
+            "─",
+            _block("<b>ИТОГО</b>", yesterday_total),
         ]
     lines += [
         "",

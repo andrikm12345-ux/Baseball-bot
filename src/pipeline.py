@@ -350,13 +350,14 @@ async def daily_cycle(bot) -> None:
 
 async def daily_stats_broadcast(bot) -> None:
     """Once a day: settle any late finishers, then push a stats digest
-    (yesterday + running totals) to every subscriber with notifications on."""
+    (yesterday split by type + running totals) to EVERY allowed user,
+    regardless of their notifications toggle (stats are not 'live spam')."""
     from src.bot.formatters import MSK_OFFSET, format_daily_digest, msk_now
     from src.bot.handlers import broadcast_signal
-    from src.signals.tracker import roi_stats
+    from src.signals.tracker import RoiStats, roi_stats
 
     logger.info("Daily stats broadcast: start")
-    await refresh_upcoming(days=2)  # catch late kick-offs that just FINISHED
+    await refresh_upcoming(days=2)
     settled_now = await settle_pending()
     if settled_now:
         logger.info(f"Daily stats broadcast: settled {settled_now} late signals")
@@ -365,39 +366,49 @@ async def daily_stats_broadcast(bot) -> None:
     yesterday_msk_date = (now_msk - timedelta(days=1)).date()
     start_msk = datetime.combine(yesterday_msk_date, datetime.min.time())
     end_msk = start_msk + timedelta(days=1)
-    # roi_stats works on Signal.created_at which is naive UTC, so translate back
     since_utc = start_msk - MSK_OFFSET
     until_utc = end_msk - MSK_OFFSET
 
-    yesterday = await roi_stats(only_value=None, since=since_utc)
-    # Filter to "before today MSK midnight" — trim signals created during today
-    # (since=… is a lower bound only). Easier: re-fetch with both bounds via DB.
     async with SessionLocal() as session:
-        q = select(SignalRow).where(
-            SignalRow.settled.is_(True),
-            SignalRow.created_at >= since_utc,
-            SignalRow.created_at < until_utc,
+        rows = list((await session.execute(
+            select(SignalRow).where(
+                SignalRow.settled.is_(True),
+                SignalRow.created_at >= since_utc,
+                SignalRow.created_at < until_utc,
+            )
+        )).scalars())
+
+    def _calc(subset: list) -> RoiStats:
+        if not subset:
+            return RoiStats(0, 0, 0, 0, 0, 0.0, 0.0)
+        staked = sum(r.stake_units for r in subset)
+        profit = sum(r.profit_units or 0.0 for r in subset)
+        won = sum(1 for r in subset if r.won)
+        returned = sum(
+            r.stake_units * r.book_odds if (r.won and r.book_odds > 1.0) else 0.0
+            for r in subset
         )
-        rows = list((await session.execute(q)).scalars())
-    if rows:
-        staked = sum(r.stake_units for r in rows)
-        profit = sum(r.profit_units or 0.0 for r in rows)
-        won = sum(1 for r in rows if r.won)
-        from src.signals.tracker import RoiStats
-        yesterday = RoiStats(
-            n_settled=len(rows), n_won=won,
-            staked=staked,
-            returned=sum(r.stake_units * r.book_odds if (r.won and r.book_odds > 1.0) else 0.0 for r in rows),
-            profit=profit,
+        return RoiStats(
+            n_settled=len(subset), n_won=won,
+            staked=staked, returned=returned, profit=profit,
             roi=(profit / staked * 100.0) if staked > 0 else 0.0,
-            hit_rate=(won / len(rows) * 100.0) if rows else 0.0,
+            hit_rate=(won / len(subset) * 100.0) if subset else 0.0,
         )
-    else:
-        from src.signals.tracker import RoiStats
-        yesterday = RoiStats(0, 0, 0, 0, 0, 0.0, 0.0)
+
+    y_total = _calc(rows)
+    y_model = _calc([r for r in rows if not r.book_odds or r.book_odds <= 1.0])
+    y_value = _calc([r for r in rows if r.book_odds and r.book_odds > 1.0])
+    y_ai = _calc([r for r in rows if getattr(r, "is_ai_ensemble", False)])
 
     total = await roi_stats(only_value=None)
-    text = format_daily_digest(yesterday, total, yesterday_msk_date.strftime("%d.%m.%Y"))
-    sent = await broadcast_signal(bot, text)
-    logger.info(f"Daily stats broadcast: sent to {sent} subscribers")
+    text = format_daily_digest(
+        yesterday_total=y_total,
+        yesterday_model=y_model,
+        yesterday_value=y_value,
+        yesterday_ai=y_ai,
+        total=total,
+        date_label=yesterday_msk_date.strftime("%d.%m.%Y"),
+    )
+    sent = await broadcast_signal(bot, text, respect_notifications=False)
+    logger.info(f"Daily stats broadcast: sent to {sent} subscribers (notifications bypassed)")
     logger.info("Daily cycle done")

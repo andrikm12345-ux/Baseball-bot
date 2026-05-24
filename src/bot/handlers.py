@@ -786,14 +786,20 @@ def register(dp: Dispatcher) -> None:
     dp.include_router(router)
 
 
-async def broadcast_signal(bot: Bot, text: str) -> int:
+async def broadcast_signal(bot: Bot, text: str, respect_notifications: bool = True) -> int:
+    """Send `text` to every allowed subscriber.
+
+    respect_notifications=True (default) — only those with notifications_enabled=True.
+    respect_notifications=False — everyone with access, used for stats digests that
+    should reach even users who muted live-signal notifications.
+    """
     sent = 0
     async with SessionLocal() as session:
+        filters = [Subscriber.active.is_(True)]
+        if respect_notifications:
+            filters.append(Subscriber.notifications_enabled.is_(True))
         subs = (await session.execute(
-            select(Subscriber).where(
-                Subscriber.active.is_(True),
-                Subscriber.notifications_enabled.is_(True),
-            )
+            select(Subscriber).where(*filters)
         )).scalars().all()
     if not subs:
         logger.warning("broadcast_signal: no active subscribers — nobody to send to")
