@@ -32,6 +32,19 @@ async def _on_startup(bot: Bot) -> None:
     # On the very first boot, bootstrap history in the background so the
     # bot is responsive immediately.
     asyncio.create_task(_first_boot_warmup(bot))
+    # And on every boot — kick a signals_loop in the background so users
+    # don't wait up to an hour for the next scheduled tick (after rare
+    # purges or container restarts the DB can otherwise look empty).
+    asyncio.create_task(_post_boot_generate(bot))
+
+
+async def _post_boot_generate(bot: Bot) -> None:
+    await asyncio.sleep(20)  # let polling settle first
+    try:
+        await refresh_upcoming(days=2)
+        await generate_and_broadcast(bot)
+    except Exception as e:
+        logger.warning(f"post-boot generate failed: {e}")
 
 
 async def _purge_disabled_market_signals() -> None:
