@@ -21,6 +21,7 @@ def main_menu(subscribed: bool = False, ai_enabled: bool = False) -> InlineKeybo
             InlineKeyboardButton(text="📈 ROI", callback_data="menu:stats"),
             InlineKeyboardButton(text="📊 График", callback_data="menu:chart"),
         ],
+        [InlineKeyboardButton(text="📜 История ставок", callback_data="menu:history")],
         [
             InlineKeyboardButton(text=sub_text, callback_data=sub_data),
             InlineKeyboardButton(text=f"🧠 AI: {ai_dot}", callback_data="menu:ai_info"),

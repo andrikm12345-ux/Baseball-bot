@@ -68,6 +68,44 @@ def format_signal(
     return "\n".join(lines)
 
 
+def format_history(rows: list[tuple[Signal, Match, Team, Team]], limit: int = 20) -> str:
+    """Per-signal settled history: outcome, market, pick, odds, score, profit."""
+    if not rows:
+        return "📜 <b>ИСТОРИЯ СТАВОК</b>\n\nПока нет закрытых ставок. Заходи позже."
+
+    n = len(rows)
+    won = sum(1 for s, *_ in rows if s.won)
+    profit = sum(s.profit_units or 0.0 for s, *_ in rows)
+    header = [
+        "📜 <b>ИСТОРИЯ СТАВОК</b>",
+        "━━━━━━━━━━━━━━━━━━━━━",
+        f"Закрыто: <b>{n}</b> · Зашло: <b>{won}</b> ({won / n * 100:.0f}%) · "
+        f"Прибыль: <b>{profit:+.2f} ед.</b>",
+        "",
+    ]
+    body: list[str] = []
+    for sig, match, home, away in rows[:limit]:
+        ok = "✅" if sig.won else "❌"
+        date = fmt_msk(match.utc_date, "%d.%m")
+        market = _MARKET_LABEL.get(sig.market, sig.market)
+        pick = _PICK_LABEL.get(sig.pick, sig.pick)
+        score = (
+            f"{match.home_goals}:{match.away_goals}"
+            if match.home_goals is not None and match.away_goals is not None
+            else "—"
+        )
+        odds_str = f"кф {sig.book_odds:.2f}" if sig.book_odds and sig.book_odds > 1.0 else "MODEL"
+        ai_mark = " 🧠" if getattr(sig, "is_ai_ensemble", False) else ""
+        pnl = f"{sig.profit_units:+.2f}" if sig.profit_units is not None else "?"
+        body.append(
+            f"{ok} <b>{date}</b> {home.name} — {away.name}{ai_mark}\n"
+            f"   {market}: <b>{pick}</b> · {odds_str} · счёт {score} · <b>{pnl} ед.</b>"
+        )
+    if n > limit:
+        body.append(f"\n<i>… и ещё {n - limit} ставок раньше.</i>")
+    return "\n".join(header + body)
+
+
 def format_signal_short(sigs: list[Signal]) -> str:
     if not sigs:
         return "⚪ нет сигнала"

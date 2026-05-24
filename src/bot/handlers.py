@@ -133,6 +133,11 @@ async def cmd_chart(msg: Message) -> None:
     await _send_chart(msg)
 
 
+@router.message(Command("history"))
+async def cmd_history(msg: Message) -> None:
+    await _send_history(msg)
+
+
 @router.message(Command("admin"))
 async def cmd_admin(msg: Message) -> None:
     if not msg.from_user or msg.from_user.id not in settings.admin_ids:
@@ -561,6 +566,8 @@ async def cb_menu(q: CallbackQuery) -> None:
         await _send_stats(q.message)
     elif action == "chart":
         await _send_chart(q.message)
+    elif action == "history":
+        await _send_history(q.message)
     elif action == "subscribe":
         await _subscribe(q.message.chat.id, q.from_user.username)
         ai_on = await get_bool("ai_ensemble_enabled", False)
@@ -704,6 +711,25 @@ async def _send_stats(msg: Message) -> None:
     total_s = await roi_stats(only_value=None)
     text = format_stats_table(model_s, value_s, ai_s, total_s)
     await msg.answer(text, parse_mode="HTML")
+
+
+async def _send_history(msg: Message) -> None:
+    from src.bot.formatters import format_history
+    async with SessionLocal() as session:
+        pairs = (await session.execute(
+            select(Signal, Match)
+            .join(Match, Match.id == Signal.match_id)
+            .where(Signal.settled.is_(True))
+            .order_by(Match.utc_date.desc(), Signal.id.desc())
+            .limit(50)
+        )).all()
+        rows = []
+        for sig, match in pairs:
+            home = await session.get(Team, match.home_team_id)
+            away = await session.get(Team, match.away_team_id)
+            if home and away:
+                rows.append((sig, match, home, away))
+    await msg.answer(format_history(rows), parse_mode="HTML")
 
 
 async def _send_chart(msg: Message) -> None:
