@@ -177,22 +177,31 @@ async def init_db() -> None:
         except Exception as e:
             logger.warning(f"commentary cleanup skipped: {e}")
         try:
-            # Drop unsettled signals from the old 7-day horizon: those carry
-            # frozen week-old odds. We use 24h as the cut-off (not 4h!) so that
-            # a normal signals_loop generation on a vespertine match isn't
-            # collateral damage. Idempotent on later boots.
-            result = await conn.execute(text(
-                "DELETE FROM signals WHERE id IN ("
-                "  SELECT s.id FROM signals s "
-                "  JOIN matches m ON m.id = s.match_id "
-                "  WHERE s.settled = FALSE "
-                "  AND m.utc_date - s.created_at > INTERVAL '24 hours'"
-                ")"
-            ))
+            # Collapse duplicate unsettled signals per match: keep one strongest
+            # pick (VALUE before MODEL, then highest edge, then highest
+            # confidence). Settled rows stay so historical ROI is unchanged.
+            # Idempotent on subsequent boots.
+            result = await conn.execute(text("""
+                DELETE FROM signals WHERE id IN (
+                  SELECT id FROM (
+                    SELECT id,
+                      ROW_NUMBER() OVER (
+                        PARTITION BY match_id
+                        ORDER BY
+                          CASE WHEN book_odds > 1.0 THEN 0 ELSE 1 END,
+                          edge DESC NULLS LAST,
+                          confidence DESC NULLS LAST,
+                          id ASC
+                      ) AS rn
+                    FROM signals
+                    WHERE settled = FALSE
+                  ) ranked
+                  WHERE rn > 1
+                )
+            """))
             if result.rowcount:
                 logger.warning(
-                    f"Purged {result.rowcount} legacy unsettled signals "
-                    f"(kickoff > 24h after creation)"
+                    f"Collapsed {result.rowcount} duplicate unsettled signals to one per match"
                 )
         except Exception as e:
-            logger.warning(f"stale-signal purge skipped: {e}")
+            logger.warning(f"unsettled-dedup skipped: {e}")
