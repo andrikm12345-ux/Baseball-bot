@@ -279,6 +279,73 @@ async def cmd_diag(msg: Message) -> None:
     await msg.answer("\n".join(text), parse_mode="HTML")
 
 
+@router.message(Command("breakdown"))
+async def cmd_breakdown(msg: Message) -> None:
+    """Admin: settled-ROI breakdown by league and by market."""
+    if not msg.from_user or msg.from_user.id not in settings.admin_ids:
+        return
+
+    async with SessionLocal() as session:
+        pairs = (await session.execute(
+            select(Signal, Match)
+            .join(Match, Match.id == Signal.match_id)
+            .where(Signal.settled.is_(True))
+        )).all()
+
+    if not pairs:
+        await msg.answer("Закрытых ставок пока нет — разбивать нечего.")
+        return
+
+    def _agg(group: dict[str, list]) -> list[tuple[str, int, int, float, float]]:
+        """Returns list of (label, n, won, roi%, profit)."""
+        out = []
+        for label, rows in group.items():
+            n = len(rows)
+            won = sum(1 for s in rows if s.won)
+            staked = sum(s.stake_units for s in rows)
+            profit = sum(s.profit_units or 0.0 for s in rows)
+            roi = (profit / staked * 100.0) if staked > 0 else 0.0
+            out.append((label, n, won, roi, profit))
+        # Sort by absolute profit so the biggest wins/losers float up
+        out.sort(key=lambda x: -abs(x[4]))
+        return out
+
+    by_league: dict[str, list] = {}
+    by_market: dict[str, list] = {}
+    for sig, match in pairs:
+        by_league.setdefault(match.competition, []).append(sig)
+        by_market.setdefault(sig.market, []).append(sig)
+
+    def _block(title: str, rows: list[tuple[str, int, int, float, float]]) -> list[str]:
+        lines = [f"<b>{title}</b>"]
+        for label, n, won, roi, profit in rows:
+            arrow = "📈" if profit >= 0 else "📉"
+            lines.append(
+                f"  {arrow} <code>{label:<6}</code> · "
+                f"{n:>3} · {won}/{n} ({won / n * 100:.0f}%) · "
+                f"ROI <b>{roi:+.1f}%</b> · <b>{profit:+.2f} ед.</b>"
+            )
+        return lines
+
+    market_label = {"1X2": "1X2", "OU25": "Тотал 2.5", "BTTS": "Обе забьют"}
+    market_rows = [
+        (market_label.get(label, label), n, won, roi, profit)
+        for label, n, won, roi, profit in _agg(by_market)
+    ]
+    lines = [
+        "🔬 <b>РАЗБИВКА ROI</b>",
+        "━━━━━━━━━━━━━━━━━━━━━",
+        f"Всего закрыто: <b>{len(pairs)}</b>",
+        "",
+        *_block("По лигам:", _agg(by_league)),
+        "",
+        *_block("По рынкам:", market_rows),
+        "",
+        "<i>Сортировка по абсолютной прибыли. При &lt; 30 ставках в срезе цифры — шум, не статистика.</i>",
+    ]
+    await msg.answer("\n".join(lines), parse_mode="HTML")
+
+
 @router.message(Command("allow"))
 async def cmd_allow(msg: Message) -> None:
     if not msg.from_user or msg.from_user.id not in settings.admin_ids:
