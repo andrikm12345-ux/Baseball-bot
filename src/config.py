@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     api_football_key: str = ""
     odds_api_key: str = ""
     anthropic_api_key: str = ""
+    tavily_api_key: str = ""
 
     ai_ensemble_weight: float = 0.3
     ai_ensemble_top_n: int = 10

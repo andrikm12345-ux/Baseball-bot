@@ -11,7 +11,10 @@ from typing import Dict, Optional
 
 from loguru import logger
 
-from src.ai.commentary import call_llm, call_llm_with_web_search
+from src.ai.commentary import call_llm
+from src.data.web_search import tavily_search
+
+
 _CACHE_TTL_SEC = 12 * 3600
 _cache: Dict[int, tuple[float, dict]] = {}
 
@@ -78,13 +81,24 @@ P(гости забьют >0.5/1.5/2.5) = {p_away_over05:.0%} / {p_away_over15:.
 Elo {home_elo:.0f} vs {away_elo:.0f}
 Форма (PPG за 10): {home_form:.2f} vs {away_form:.2f}
 
-СВЕЖИЕ ДАННЫЕ: используй web_search чтобы найти за последние 7 дней:
-travmы, дисквалификации, состав на ближайший матч, мотивацию (борьба за топ-4 / еврокубки / вылет), погоду, заявления тренеров. Делай не больше 2-3 поисков.
+СВЕЖИЕ ДАННЫЕ ИЗ СЕТИ:
+{web_block}
 
 ЗАДАЧА: пройди все 7 ступеней мысленно. Сформируй СВОИ независимые вероятности на 11 рынках. Если данных мало — пометь предположения, но не уходи в фантазии.
 
 Верни СТРОГО JSON, без markdown:
 {{"p_home": float, "p_draw": float, "p_away": float, "p_over25": float, "p_btts": float, "p_home_over05": float, "p_home_over15": float, "p_home_over25": float, "p_away_over05": float, "p_away_over15": float, "p_away_over25": float, "reasoning": "1-2 предложения с главным расхождением"}}"""
+
+
+def _format_web(results: list[dict]) -> str:
+    if not results:
+        return "(нет свежих данных)"
+    lines = []
+    for r in results[:5]:
+        title = r.get("title", "").strip()
+        content = r.get("content", "").strip()
+        lines.append(f"• {title}: {content[:250]}")
+    return "\n".join(lines)
 
 
 def _parse_json_strict(raw: str) -> Optional[dict]:
@@ -160,6 +174,9 @@ async def ai_predict(
         _cache[match_id] = (now, db_cached)
         return db_cached
 
+    web_results = await tavily_search(
+        f"{home} vs {away} team news injuries lineup", days=7
+    )
     prompt = _PROMPT.format(
         home=home,
         away=away,
@@ -179,13 +196,10 @@ async def ai_predict(
         away_elo=features.get("away_elo", 1500),
         home_form=features.get("home_form_pts", 1.5),
         away_form=features.get("away_form_pts", 1.5),
+        web_block=_format_web(web_results),
     )
 
-    raw = await call_llm_with_web_search(prompt, max_tokens=1500)
-    if not raw:
-        # Fall back to plain LLM call (no web search) — e.g. if no direct
-        # Anthropic key is configured and only a proxy is available.
-        raw = await call_llm(prompt, max_tokens=900)
+    raw = await call_llm(prompt, max_tokens=900)
     if not raw:
         logger.warning(f"ai_predict({match_id}): empty LLM response")
         return None
