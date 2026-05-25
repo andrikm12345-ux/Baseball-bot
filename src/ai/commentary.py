@@ -118,6 +118,51 @@ async def call_llm(prompt: str, max_tokens: int = 350) -> Optional[str]:
         return None
 
 
+async def call_llm_with_web_search(prompt: str, max_tokens: int = 1200) -> Optional[str]:
+    """Call Claude via the direct Anthropic API with the built-in web_search tool.
+
+    Returns the final text Claude produced after running its searches. If no
+    direct Anthropic key is configured, returns None — caller should fall back
+    to a search-less prompt.
+    """
+    key = settings.anthropic_api_key
+    if not key:
+        logger.warning("call_llm_with_web_search: no ANTHROPIC_API_KEY — web search disabled")
+        return None
+    model = settings.llm_model or "claude-sonnet-4-6"
+    body = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "tools": [{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    headers = {
+        "x-api-key": key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.post(
+                "https://api.anthropic.com/v1/messages",
+                json=body, headers=headers, timeout=120,
+            ) as r:
+                if r.status != 200:
+                    text = await r.text()
+                    logger.warning(f"Anthropic web_search {r.status}: {text[:300]}")
+                    return None
+                data = await r.json()
+    except asyncio.TimeoutError:
+        logger.warning("LLM web_search timeout")
+        return None
+    except Exception as e:
+        logger.warning(f"LLM web_search failed: {e}")
+        return None
+    return "".join(
+        block.get("text", "") for block in data.get("content", []) if block.get("type") == "text"
+    ).strip()
+
+
 async def generate_commentary(
     *,
     match_id: int,
