@@ -60,16 +60,20 @@ _PROMPT = """Ты — элитный футбольный аналитик. 15+ 
 
 ЦЕЛЬ: максимальный value в матче {home} vs {away} ({competition}).
 
-ЖЁСТКОЕ ПРАВИЛО: взвешивай каждую цифру. Никакой отсебятины не из данных. Если данные противоречат — выбери весомый аргумент.
+ЖЁСТКИЕ ПРАВИЛА:
+- ОБЯЗАН пройти ВСЕ 7 ступеней. Каждая ступень = отдельное поле в JSON-ответе с КОНКРЕТНЫМ выводом по данным, а не общими словами.
+- Никакой отсебятины: каждое утверждение должно опираться либо на цифры из блока ДАННЫЕ ОТ ML, либо на блок СВЕЖИЕ ДАННЫЕ. Если в блоках инфы нет — пиши "данных недостаточно" по этой ступени, НЕ выдумывай.
+- Если данные противоречат — выбери весомый аргумент и явно укажи противоречие.
+- Ответ без любой из ступеней = НЕВАЛИДНЫЙ, лучше совсем не отвечать.
 
 АЛГОРИТМ (7 ступеней):
 1. ЦИФРОВОЙ ФУНДАМЕНТ: форма за 6 туров, xG/xGA портрет, фильтр «решающие матчи», стандарты, последние 15 минут.
 2. КАДРОВАЯ ТЕКТОНИКА: критические потери (вратарь, бомбардир), глубина скамейки, изоляции на флангах.
 3. H2H: только 2-3 года; если контекст изменился (мотивация, тренер, состав) — вес тренда −50%.
 4. ФАКТОР X: судья (пенальти/ЖК), погода, дерби, психология. Мотивация: обычная (0%), повышенная (+5%), экстремальная (+10-15%). В плей-офф с минимальным преимуществом вероятность ничьи +10-15%.
-5. РЫНОЧНЫЙ РАЗРЕЗ: вычисти маржу, сравни истинные вероятности с рыночными, найди расхождение ≥6%.
+5. РЫНОЧНЫЙ РАЗРЕЗ: сравни своё ощущение с ML-вероятностями, найди расхождение ≥6%.
 6. СБОРКА: соедини ступени 1-5, найди противоречия, проверь экстремальный сценарий («последний бой», слом H2H).
-7. ИТОГ: ищем валуй >6% при кэфе ≥2.50; иначе >8% при ≥1.80; иначе >10% при ≥1.50.
+7. ИТОГ: финальные вероятности по всем 11 рынкам. Если data sufficient — даёшь конкретные числа; если нет — повторяешь ML с минимальной коррекцией.
 
 ДАННЫЕ ОТ ML-МОДЕЛИ (XGBoost):
 P(дом) = {p_home:.0%}, P(ничья) = {p_draw:.0%}, P(гости) = {p_away:.0%}
@@ -84,10 +88,8 @@ Elo {home_elo:.0f} vs {away_elo:.0f}
 СВЕЖИЕ ДАННЫЕ ИЗ СЕТИ:
 {web_block}
 
-ЗАДАЧА: пройди все 7 ступеней мысленно. Сформируй СВОИ независимые вероятности на 11 рынках. Если данных мало — пометь предположения, но не уходи в фантазии.
-
-Верни СТРОГО JSON, без markdown:
-{{"p_home": float, "p_draw": float, "p_away": float, "p_over25": float, "p_btts": float, "p_home_over05": float, "p_home_over15": float, "p_home_over25": float, "p_away_over05": float, "p_away_over15": float, "p_away_over25": float, "reasoning": "1-2 предложения с главным расхождением"}}"""
+Верни СТРОГО JSON, без markdown и без текста до или после JSON:
+{{"step1_numerics": "1-2 предложения по форме/xG/решающим", "step2_squad": "1-2 предложения по составу и потерям", "step3_h2h": "1-2 предложения по очным", "step4_factor_x": "1-2 предложения по судье/погоде/мотивации", "step5_market_gap": "1-2 предложения о расхождении со своей оценкой", "step6_synthesis": "1-2 предложения о противоречиях и финальной логике", "step7_verdict": "главный пик и почему", "p_home": float, "p_draw": float, "p_away": float, "p_over25": float, "p_btts": float, "p_home_over05": float, "p_home_over15": float, "p_home_over25": float, "p_away_over05": float, "p_away_over15": float, "p_away_over25": float, "reasoning": "1-2 предложения с главным расхождением для показа в TG"}}"""
 
 
 def _format_web(results: list[dict]) -> str:
@@ -126,9 +128,22 @@ def _parse_json_strict(raw: str) -> Optional[dict]:
     return None
 
 
+_REQUIRED_STEPS = (
+    "step1_numerics", "step2_squad", "step3_h2h", "step4_factor_x",
+    "step5_market_gap", "step6_synthesis", "step7_verdict",
+)
+
+
 def _validate_probs(d: dict) -> bool:
     if not isinstance(d, dict):
         return False
+    # Each of the 7 reasoning steps must be present and non-empty — that's the
+    # hard contract with the model. Skipping a step = invalid answer.
+    for step in _REQUIRED_STEPS:
+        v = d.get(step)
+        if not isinstance(v, str) or not v.strip():
+            logger.warning(f"ai_predict: missing/empty step '{step}'")
+            return False
     for key in ("p_home", "p_draw", "p_away", "p_over25", "p_btts"):
         v = d.get(key)
         if not isinstance(v, (int, float)):
@@ -199,15 +214,23 @@ async def ai_predict(
         web_block=_format_web(web_results),
     )
 
-    raw = await call_llm(prompt, max_tokens=900)
+    # 7-step JSON ≈ 250-400 output tokens above the probability block. Headroom
+    # at 1500 prevents truncation mid-JSON that would void validation.
+    raw = await call_llm(prompt, max_tokens=1500)
     if not raw:
         logger.warning(f"ai_predict({match_id}): empty LLM response")
         return None
 
     parsed = _parse_json_strict(raw)
     if not parsed or not _validate_probs(parsed):
-        logger.warning(f"ai_predict({match_id}): invalid JSON or probs: {raw[:200]}")
+        logger.warning(f"ai_predict({match_id}): invalid JSON or missing steps; raw={raw[:300]}")
         return None
+    # Trace the chain-of-thought into logs so we can audit whether Claude
+    # actually went through every step or just paraphrased.
+    logger.debug(
+        f"ai_predict({match_id}) steps:\n"
+        + "\n".join(f"  · {k}: {parsed.get(k, '')[:160]}" for k in _REQUIRED_STEPS)
+    )
 
     _cache[match_id] = (now, parsed)
     await _db_cache_put(match_id, parsed)
