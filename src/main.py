@@ -115,12 +115,16 @@ async def main() -> None:
     # Pull upcoming matches every 6 hours
     scheduler.add_job(refresh_upcoming, IntervalTrigger(hours=6), id="refresh_upcoming")
     # Morning digest at 09:00 local time
-    scheduler.add_job(broadcast_digest, CronTrigger(hour=9, minute=0), args=[bot], id="digest")
-    # End-of-day stats digest at 04:30 MSK — after daily_cycle (04:00) has
-    # settled yesterday's matches.
+    # Morning digest at 09:10 — right after the stats digest at 09:00 so the
+    # two messages arrive in the natural order (yesterday's results → today's
+    # picks) without colliding on the same scheduler tick.
+    scheduler.add_job(broadcast_digest, CronTrigger(hour=9, minute=10), args=[bot], id="digest")
+    # End-of-day stats digest at 09:00 MSK. Late kicks (Brazil, late Italian
+    # matches) finish around 04-06 MSK; pushing the digest to 09:00 lets
+    # settle_pending pick them up before we summarise.
     scheduler.add_job(
         daily_stats_broadcast,
-        CronTrigger(hour=4, minute=30),
+        CronTrigger(hour=9, minute=0),
         args=[bot],
         id="daily_stats",
     )
