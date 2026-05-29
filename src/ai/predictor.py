@@ -62,7 +62,7 @@ _PROMPT = """Ты — элитный футбольный аналитик. 15+ 
 
 ЖЁСТКИЕ ПРАВИЛА:
 - ОБЯЗАН пройти ВСЕ 7 ступеней. Каждая ступень = отдельное поле в JSON-ответе с КОНКРЕТНЫМ выводом по данным, а не общими словами.
-- Никакой отсебятины: каждое утверждение должно опираться либо на цифры из блока ДАННЫЕ ОТ ML, либо на блок СВЕЖИЕ ДАННЫЕ. Если в блоках инфы нет — пиши "данных недостаточно" по этой ступени, НЕ выдумывай.
+- Никакой отсебятины: каждое утверждение опирается либо на статистику команд, либо на блок СВЕЖИЕ ДАННЫЕ. Если в блоках инфы нет — пиши "данных недостаточно", НЕ выдумывай.
 - Если данные противоречат — выбери весомый аргумент и явно укажи противоречие.
 - Ответ без любой из ступеней = НЕВАЛИДНЫЙ, лучше совсем не отвечать.
 
@@ -71,25 +71,22 @@ _PROMPT = """Ты — элитный футбольный аналитик. 15+ 
 2. КАДРОВАЯ ТЕКТОНИКА: критические потери (вратарь, бомбардир), глубина скамейки, изоляции на флангах.
 3. H2H: только 2-3 года; если контекст изменился (мотивация, тренер, состав) — вес тренда −50%.
 4. ФАКТОР X: судья (пенальти/ЖК), погода, дерби, психология. Мотивация: обычная (0%), повышенная (+5%), экстремальная (+10-15%). В плей-офф с минимальным преимуществом вероятность ничьи +10-15%.
-5. РЫНОЧНЫЙ РАЗРЕЗ: сравни своё ощущение с ML-вероятностями, найди расхождение ≥6%.
+5. РЫНОЧНЫЙ РАЗРЕЗ: оцени свои вероятности относительно ожидаемой линии букмекера, найди расхождение ≥6%.
 6. СБОРКА: соедини ступени 1-5, найди противоречия, проверь экстремальный сценарий («последний бой», слом H2H).
-7. ИТОГ: финальные вероятности по всем 11 рынкам. Если data sufficient — даёшь конкретные числа; если нет — повторяешь ML с минимальной коррекцией.
-
-ДАННЫЕ ОТ ML-МОДЕЛИ (XGBoost):
-P(дом) = {p_home:.0%}, P(ничья) = {p_draw:.0%}, P(гости) = {p_away:.0%}
-P(тотал>2.5) = {p_over25:.0%}, P(обе забьют) = {p_btts:.0%}
-P(дом забьёт >0.5/1.5/2.5) = {p_home_over05:.0%} / {p_home_over15:.0%} / {p_home_over25:.0%}
-P(гости забьют >0.5/1.5/2.5) = {p_away_over05:.0%} / {p_away_over15:.0%} / {p_away_over25:.0%}
+7. ИТОГ: финальные вероятности по всем 5 рынкам (1X2, тотал 2.5, обе забьют).
 
 ИСТОРИЧЕСКИЙ КОНТЕКСТ:
 Elo {home_elo:.0f} vs {away_elo:.0f}
 Форма (PPG за 10): {home_form:.2f} vs {away_form:.2f}
+Голы дома ({home}): забивает {home_gf:.2f}, пропускает {home_ga:.2f}
+Голы в гостях ({away}): забивает {away_gf:.2f}, пропускает {away_ga:.2f}
+H2H: домашняя выигрывает в {h2h_wr:.0%} случаев, средний тотал {h2h_g:.2f}
 
 СВЕЖИЕ ДАННЫЕ ИЗ СЕТИ:
 {web_block}
 
 Верни СТРОГО JSON, без markdown и без текста до или после JSON:
-{{"step1_numerics": "1-2 предложения по форме/xG/решающим", "step2_squad": "1-2 предложения по составу и потерям", "step3_h2h": "1-2 предложения по очным", "step4_factor_x": "1-2 предложения по судье/погоде/мотивации", "step5_market_gap": "1-2 предложения о расхождении со своей оценкой", "step6_synthesis": "1-2 предложения о противоречиях и финальной логике", "step7_verdict": "главный пик и почему", "p_home": float, "p_draw": float, "p_away": float, "p_over25": float, "p_btts": float, "p_home_over05": float, "p_home_over15": float, "p_home_over25": float, "p_away_over05": float, "p_away_over15": float, "p_away_over25": float, "reasoning": "1-2 предложения с главным расхождением для показа в TG"}}"""
+{{"step1_numerics": "1-2 предложения по форме/xG/решающим", "step2_squad": "1-2 предложения по составу и потерям", "step3_h2h": "1-2 предложения по очным", "step4_factor_x": "1-2 предложения по судье/погоде/мотивации", "step5_market_gap": "1-2 предложения о расхождении со своей оценкой", "step6_synthesis": "1-2 предложения о противоречиях и финальной логике", "step7_verdict": "главный пик и почему", "p_home": float, "p_draw": float, "p_away": float, "p_over25": float, "p_btts": float, "reasoning": "1-2 предложения с главным расхождением для показа в TG"}}"""
 
 
 def _format_web(results: list[dict]) -> str:
@@ -175,10 +172,13 @@ async def ai_predict(
     home: str,
     away: str,
     competition: str,
-    ml_probs: dict,
     features: dict,
 ) -> Optional[dict]:
-    """Returns {p_home, p_draw, p_away, p_over25, p_btts, reasoning} or None."""
+    """Returns {p_home, p_draw, p_away, p_over25, p_btts, ...steps, reasoning} or None.
+
+    Pure AI mode: no ML probabilities go into the prompt. Claude bases its
+    estimates solely on team history (passed via `features`) and web search.
+    """
     now = time.time()
     cached = _cache.get(match_id)
     if cached and now - cached[0] < _CACHE_TTL_SEC:
@@ -196,21 +196,16 @@ async def ai_predict(
         home=home,
         away=away,
         competition=competition,
-        p_home=ml_probs.get("p_home", 0.33),
-        p_draw=ml_probs.get("p_draw", 0.33),
-        p_away=ml_probs.get("p_away", 0.33),
-        p_over25=ml_probs.get("p_over25", 0.5),
-        p_btts=ml_probs.get("p_btts", 0.5),
-        p_home_over05=ml_probs.get("p_home_over05", 0.7),
-        p_home_over15=ml_probs.get("p_home_over15", 0.4),
-        p_home_over25=ml_probs.get("p_home_over25", 0.2),
-        p_away_over05=ml_probs.get("p_away_over05", 0.6),
-        p_away_over15=ml_probs.get("p_away_over15", 0.3),
-        p_away_over25=ml_probs.get("p_away_over25", 0.15),
         home_elo=features.get("home_elo", 1500),
         away_elo=features.get("away_elo", 1500),
         home_form=features.get("home_form_pts", 1.5),
         away_form=features.get("away_form_pts", 1.5),
+        home_gf=features.get("home_gf_home_avg", features.get("home_gf_avg", 1.3)),
+        home_ga=features.get("home_ga_home_avg", features.get("home_ga_avg", 1.3)),
+        away_gf=features.get("away_gf_away_avg", features.get("away_gf_avg", 1.0)),
+        away_ga=features.get("away_ga_away_avg", features.get("away_ga_avg", 1.4)),
+        h2h_wr=features.get("h2h_home_winrate", 0.5),
+        h2h_g=features.get("h2h_avg_goals", 2.6),
         web_block=_format_web(web_results),
     )
 

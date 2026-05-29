@@ -60,7 +60,7 @@ class Settings(BaseSettings):
 
     min_edge: float = 0.05
     min_confidence: float = 0.55
-    min_odds: float = 1.50
+    min_odds: float = 1.80
     max_odds: float = 4.50
 
     tz: str = "Europe/Moscow"

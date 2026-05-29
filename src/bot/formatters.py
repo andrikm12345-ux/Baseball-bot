@@ -45,22 +45,17 @@ def format_signal(
     sig: Signal, match: Match, home: Team, away: Team, ai_comment: str | None = None
 ) -> str:
     kickoff = fmt_msk(match.utc_date, "%d.%m %H:%M МСК")
-    badge = "🎯 VALUE" if (sig.book_odds and sig.book_odds > 1.0) else "🤖 MODEL"
-    if getattr(sig, "is_ai_ensemble", False):
-        badge += " · 🧠 AI"
     lines = [
-        f"<b>{badge}</b>  <i>{match.competition}</i>",
+        f"<b>🧠 CLAUDE</b>  <i>{match.competition}</i>",
         f"⚽ <b>{home.name}</b> — <b>{away.name}</b>",
         f"🕒 {kickoff}",
         f"📊 Рынок: <b>{_MARKET_LABEL.get(sig.market, sig.market)}</b>",
         f"✅ Ставка: <b>{_PICK_LABEL.get(sig.pick, sig.pick)}</b>",
-        f"🔢 Вероятность модели: <b>{sig.model_prob*100:.1f}%</b>",
-        f"⚖️ Справедливый кф: <b>{sig.fair_odds:.2f}</b>",
+        f"🔢 Уверенность Claude: <b>{sig.model_prob*100:.1f}%</b>",
     ]
     if sig.book_odds and sig.book_odds > 1.0:
         lines += [
             f"💰 Кф букмекера: <b>{sig.book_odds:.2f}</b>",
-            f"📈 Edge: <b>{sig.edge*100:.1f}%</b>",
             f"💵 Стейк: <b>{sig.stake_units:.2f}</b> ед.",
         ]
     if ai_comment:

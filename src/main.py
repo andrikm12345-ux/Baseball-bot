@@ -20,7 +20,6 @@ from src.pipeline import (
     daily_stats_broadcast,
     generate_and_broadcast,
     refresh_upcoming,
-    train_models,
 )
 from src.signals.tracker import settle_pending
 
@@ -64,22 +63,14 @@ async def _purge_disabled_market_signals() -> None:
 async def _first_boot_warmup(bot: Bot) -> None:
     from sqlalchemy import select, func
     from src.data.database import Match, SessionLocal
-    from src.ml.predict import Predictor
     try:
         async with SessionLocal() as s:
             n = (await s.execute(select(func.count(Match.id)))).scalar_one()
-        cold_start = n < 100
-        predictor_stale = not Predictor().ready
-        if cold_start:
+        if n < 100:
             logger.info("Cold start: bootstrapping historical data")
             await bootstrap_history()
-        if cold_start or predictor_stale:
-            logger.info(
-                f"Training models (cold_start={cold_start}, stale={predictor_stale})"
-            )
-            await train_models(bot=bot)
-            await refresh_upcoming(days=7)
-            await generate_and_broadcast(bot)
+        await refresh_upcoming(days=7)
+        await generate_and_broadcast(bot)
     except Exception as e:
         logger.exception(f"Warm-up failed: {e}")
 

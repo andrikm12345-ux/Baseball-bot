@@ -1,9 +1,9 @@
-"""End-to-end pipeline: ingest → features → train → predict → emit signals."""
+"""End-to-end pipeline: ingest → odds → Claude analysis → emit signals."""
 from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta
-from typing import List
+from typing import List, Optional
 
 import pandas as pd
 from loguru import logger
@@ -14,15 +14,20 @@ from src.bot.formatters import format_signal
 from src.bot.handlers import broadcast_signal
 from src.config import settings
 from src.data.database import AiPrediction, Match, SessionLocal, Signal as SignalRow, Team
-from src.data.features import build_features, build_inference_features
+from src.data.features import build_inference_features
 from src.data.football_api import FootballDataClient
 from src.data.ingest import ingest_history, ingest_upcoming
 from src.data.odds_api import OddsApiClient, fetch_odds_for_matches
-from src.data.settings_store import get_bool
-from src.ml.predict import Predictor
-from src.ml.train import train_all
-from src.signals.generator import Signal, generate
+from src.signals.generator import Signal
 from src.signals.tracker import settle_pending
+
+
+# ITB markets are never generated in AI-only mode, but the constant is still
+# referenced by the legacy-signal purge in main.py / handlers.py.
+DISABLED_MARKETS: set[str] = {
+    "HOME_OVER05", "HOME_OVER15", "HOME_OVER25",
+    "AWAY_OVER05", "AWAY_OVER15", "AWAY_OVER25",
+}
 
 
 async def _load_matches_df() -> pd.DataFrame:
@@ -67,63 +72,6 @@ async def refresh_upcoming(days: int = 7) -> int:
         await client.close()
 
 
-async def train_models(bot=None) -> None:
-    df = await _load_matches_df()
-    if df.empty:
-        logger.warning("No matches in DB — skip training")
-        return
-    finished = df[df["status"] == "FINISHED"].copy()
-    if len(finished) < 200:
-        logger.warning(f"Only {len(finished)} finished matches — not training yet")
-        return
-    features = build_features(finished)
-    result = train_all(features)
-    logger.info(f"Models saved: {result['paths']}")
-    if bot:
-        await _notify_admins_training(bot, result["metrics"])
-
-
-async def _notify_admins_training(bot, metrics: dict) -> None:
-    from src.bot.formatters import format_training_report
-    text = format_training_report(metrics)
-    for admin_id in settings.admin_ids:
-        try:
-            await bot.send_message(admin_id, text, parse_mode="HTML")
-        except Exception as e:
-            logger.warning(f"train notify to {admin_id} failed: {e}")
-
-
-DISABLED_MARKETS: set[str] = {
-    "HOME_OVER05", "HOME_OVER15", "HOME_OVER25",
-    "AWAY_OVER05", "AWAY_OVER15", "AWAY_OVER25",
-}
-
-
-def _best_signal_per_match(signals: List["Signal"]) -> List["Signal"]:
-    """Keep only the strongest pick per match.
-
-    Ranking: VALUE first (book_odds > 1), then by edge desc, then by confidence
-    desc. Stops the bot from publishing two picks on the same fixture which
-    feels like 'placing two bets on one game'.
-    """
-    from src.signals.generator import Signal as Sig
-
-    by_match: dict[int, Sig] = {}
-    for s in signals:
-        cur = by_match.get(s.match_id)
-        if cur is None:
-            by_match[s.match_id] = s
-            continue
-
-        def score(x: Sig) -> tuple[int, float, float]:
-            is_value = 1 if (x.book_odds and x.book_odds > 1.0) else 0
-            return (is_value, x.edge or 0.0, x.confidence or 0.0)
-
-        if score(s) > score(cur):
-            by_match[s.match_id] = s
-    return list(by_match.values())
-
-
 async def _store_signals(
     signals: List[Signal], ai_match_ids: set[int] | None = None
 ) -> List[SignalRow]:
@@ -157,10 +105,13 @@ async def _store_signals(
 
 
 async def generate_and_broadcast(bot) -> int:
-    """Generate signals for upcoming matches and broadcast new ones."""
-    predictor = Predictor()
-    if not predictor.ready:
-        logger.warning("Models not ready — skip signal generation")
+    """AI-only signal generation. Claude analyses every upcoming match;
+    we publish if the recommended pick has bookmaker odds >= settings.min_odds.
+    The admin '🧠 AI' toggle acts as the master on/off for signal generation.
+    """
+    from src.data.settings_store import get_bool
+    if not await get_bool("ai_ensemble_enabled", False):
+        logger.info("Signal generation paused (AI toggle OFF)")
         return 0
     df = await _load_matches_df()
     if df.empty:
@@ -179,15 +130,15 @@ async def generate_and_broadcast(bot) -> int:
     feats = build_inference_features(upcoming, finished)
     if feats.empty:
         return 0
-    preds = predictor.predict(feats)
 
-    # Attach bookmaker odds if we have an Odds API key
+    # Pull odds for all candidate matches in one batch
+    odds_map: dict[int, dict] = {}
     if settings.odds_api_key:
         odds_client = OddsApiClient(settings.odds_api_key)
         try:
             async with SessionLocal() as session:
                 tuples = []
-                for mid in preds["match_id"].tolist():
+                for mid in feats["match_id"].tolist():
                     match = await session.get(Match, int(mid))
                     if not match:
                         continue
@@ -198,26 +149,47 @@ async def generate_and_broadcast(bot) -> int:
             odds_map = await fetch_odds_for_matches(odds_client, tuples)
         finally:
             await odds_client.close()
-        for col in [
-            "odds_home", "odds_draw", "odds_away",
-            "odds_over25", "odds_under25",
-            "odds_btts_yes", "odds_btts_no",
-        ]:
-            preds[col] = preds["match_id"].map(lambda m: (odds_map.get(int(m)) or {}).get(col, 0.0))
-        logger.info(f"Attached odds to {sum(1 for v in odds_map.values() if v)}/{len(preds)} matches")
+        logger.info(f"Pulled odds for {sum(1 for v in odds_map.values() if v)}/{len(feats)} matches")
 
-    ai_match_ids: set[int] = set()
-    if await get_bool("ai_ensemble_enabled", False):
-        preds, ai_match_ids = await _apply_ai_ensemble(preds, feats)
+    # Skip matches we already published any signal on
+    async with SessionLocal() as session:
+        already = {
+            int(m) for m in (await session.execute(
+                select(SignalRow.match_id)
+                .where(SignalRow.match_id.in_([int(x) for x in feats["match_id"]]))
+                .distinct()
+            )).scalars().all()
+        }
+        match_meta: dict[int, tuple[str, str, str]] = {}
+        for mid in feats["match_id"].tolist():
+            if int(mid) in already:
+                continue
+            match = await session.get(Match, int(mid))
+            if not match:
+                continue
+            home = await session.get(Team, match.home_team_id)
+            away = await session.get(Team, match.away_team_id)
+            if home and away:
+                match_meta[int(mid)] = (home.name, away.name, match.competition)
+    if already:
+        logger.info(f"AI loop: skipping {len(already)} match(es) already signalled")
 
-    preds["_ai_applied"] = preds["match_id"].isin(ai_match_ids)
-    signals = generate(preds)
-    signals = _best_signal_per_match(signals)
-    new_rows = await _store_signals(signals, ai_match_ids=ai_match_ids)
+    signals: List[Signal] = []
+    feats_by_id = {int(r["match_id"]): r.to_dict() for _, r in feats.iterrows()}
+    for mid, (home_name, away_name, comp) in match_meta.items():
+        ai = await ai_predict(
+            match_id=mid, home=home_name, away=away_name, competition=comp,
+            features=feats_by_id.get(mid, {}),
+        )
+        if not ai:
+            continue
+        sig = _ai_to_signal(mid, ai, odds_map.get(mid) or {})
+        if sig is not None:
+            signals.append(sig)
+
+    new_rows = await _store_signals(signals, ai_match_ids={s.match_id for s in signals})
     sent = 0
-    ai_on = await get_bool("ai_ensemble_enabled", False)
     if new_rows and bot:
-        feats_by_id = {int(r["match_id"]): r.to_dict() for _, r in feats.iterrows()}
         async with SessionLocal() as session:
             for row in new_rows:
                 match = await session.get(Match, row.match_id)
@@ -225,152 +197,79 @@ async def generate_and_broadcast(bot) -> int:
                     continue
                 home = await session.get(Team, match.home_team_id)
                 away = await session.get(Team, match.away_team_id)
+                cached_ai = await session.get(AiPrediction, row.match_id)
                 ai_comment = None
-                if ai_on and row.match_id in ai_match_ids:
-                    cached_ai = await session.get(AiPrediction, row.match_id)
-                    if cached_ai:
-                        try:
-                            ai_comment = json.loads(cached_ai.payload).get("reasoning")
-                        except Exception:
-                            ai_comment = None
-                    if ai_comment:
-                        stored = await session.get(SignalRow, row.id)
-                        if stored:
-                            stored.commentary = ai_comment
-                            await session.commit()
+                if cached_ai:
+                    try:
+                        ai_comment = json.loads(cached_ai.payload).get("reasoning")
+                    except Exception:
+                        ai_comment = None
+                if ai_comment:
+                    stored = await session.get(SignalRow, row.id)
+                    if stored:
+                        stored.commentary = ai_comment
+                        await session.commit()
                 text = format_signal(row, match, home, away, ai_comment)
                 sent += await broadcast_signal(bot, text)
     logger.info(
-        f"Generated {len(new_rows)} new signals, broadcast {sent} messages "
-        f"(AI={'on' if ai_on else 'off'})"
+        f"AI loop: {len(match_meta)} matches analysed, "
+        f"{len(signals)} signals, {sent} broadcast"
     )
     return len(new_rows)
 
 
-async def _apply_ai_ensemble(
-    preds: pd.DataFrame, feats: pd.DataFrame
-) -> tuple[pd.DataFrame, set[int]]:
-    """Blend XGBoost preds with AI predictor for top-N most confident matches.
-
-    Returns (modified_preds, set_of_match_ids_actually_corrected_by_ai).
+def _ai_to_signal(match_id: int, ai: dict, odds: dict) -> Optional[Signal]:
+    """Pick the best market for a match given Claude's probabilities and the
+    bookmaker line. Requires book odds >= settings.min_odds; otherwise None.
     """
-    import asyncio
-
-    weight = settings.ai_ensemble_weight
-    top_n = settings.ai_ensemble_top_n
-
-    feats_by_id = {int(r["match_id"]): r.to_dict() for _, r in feats.iterrows()}
-    preds = preds.copy()
-    threshold = settings.ai_ensemble_min_prob
-    preds["_max_1x2"] = preds[["p_home", "p_draw", "p_away"]].max(axis=1)
-    candidates = (
-        preds[preds["_max_1x2"] >= threshold]
-        .sort_values("_max_1x2", ascending=False)
-        .head(top_n)
+    candidates = []
+    p_home, p_draw, p_away = ai.get("p_home", 0), ai.get("p_draw", 0), ai.get("p_away", 0)
+    best_1x2 = max(
+        [("HOME", p_home, odds.get("odds_home", 0.0)),
+         ("DRAW", p_draw, odds.get("odds_draw", 0.0)),
+         ("AWAY", p_away, odds.get("odds_away", 0.0))],
+        key=lambda x: x[1],
     )
-    preds.drop(columns=["_max_1x2"], inplace=True)
+    candidates.append(("1X2", *best_1x2))
 
-    if candidates.empty:
-        return preds, set()
+    p_over = ai.get("p_over25", 0.5)
+    if p_over >= 0.5:
+        candidates.append(("OU25", "OVER", p_over, odds.get("odds_over25", 0.0)))
+    else:
+        candidates.append(("OU25", "UNDER", 1 - p_over, odds.get("odds_under25", 0.0)))
 
-    async with SessionLocal() as session:
-        # Skip matches that already have any signal stored — no need to spend
-        # another AI call to re-evaluate something we've already published.
-        existing_rows = (await session.execute(
-            select(SignalRow.match_id)
-            .where(SignalRow.match_id.in_([int(m) for m in candidates["match_id"]]))
-            .distinct()
-        )).scalars().all()
-        already_signaled = {int(m) for m in existing_rows}
-        if already_signaled:
-            logger.info(
-                f"AI ensemble: skipping {len(already_signaled)} match(es) that already have signals"
-            )
-        tasks = []
-        match_meta = {}
-        for _, row in candidates.iterrows():
-            mid = int(row["match_id"])
-            if mid in already_signaled:
-                continue
-            match = await session.get(Match, mid)
-            if not match:
-                continue
-            home = await session.get(Team, match.home_team_id)
-            away = await session.get(Team, match.away_team_id)
-            if not home or not away:
-                continue
-            match_meta[mid] = (home.name, away.name, match.competition)
-            tasks.append((mid, row))
+    p_btts = ai.get("p_btts", 0.5)
+    if p_btts >= 0.5:
+        candidates.append(("BTTS", "YES", p_btts, odds.get("odds_btts_yes", 0.0)))
+    else:
+        candidates.append(("BTTS", "NO", 1 - p_btts, odds.get("odds_btts_no", 0.0)))
 
-    sem = asyncio.Semaphore(3)
-
-    async def _one(mid: int, row) -> tuple[int, dict | None]:
-        async with sem:
-            ml_probs = {
-                "p_home": float(row["p_home"]),
-                "p_draw": float(row["p_draw"]),
-                "p_away": float(row["p_away"]),
-                "p_over25": float(row["p_over25"]),
-                "p_btts": float(row["p_btts"]),
-            }
-            for col in (
-                "p_home_over05", "p_home_over15", "p_home_over25",
-                "p_away_over05", "p_away_over15", "p_away_over25",
-            ):
-                if col in row and pd.notna(row[col]):
-                    ml_probs[col] = float(row[col])
-            home, away, comp = match_meta[mid]
-            ai = await ai_predict(
-                match_id=mid,
-                home=home, away=away, competition=comp,
-                ml_probs=ml_probs,
-                features=feats_by_id.get(mid, {}),
-            )
-            return mid, ai
-
-    results = await asyncio.gather(*[_one(mid, r) for mid, r in tasks])
-
-    applied: set[int] = set()
-    diffs = []
-    for mid, ai in results:
-        if not ai:
-            continue
-        mask = preds["match_id"] == mid
-        for col in ("p_home", "p_draw", "p_away", "p_over25", "p_btts"):
-            ml_v = float(preds.loc[mask, col].iloc[0])
-            ai_v = float(ai[col])
-            diffs.append(abs(ml_v - ai_v))
-            preds.loc[mask, col] = (1 - weight) * ml_v + weight * ai_v
-        for col in (
-            "p_home_over05", "p_home_over15", "p_home_over25",
-            "p_away_over05", "p_away_over15", "p_away_over25",
-        ):
-            if col not in ai or col not in preds.columns:
-                continue
-            cur = preds.loc[mask, col].iloc[0]
-            if pd.isna(cur):
-                continue
-            ml_v = float(cur)
-            ai_v = float(ai[col])
-            diffs.append(abs(ml_v - ai_v))
-            preds.loc[mask, col] = (1 - weight) * ml_v + weight * ai_v
-        applied.add(mid)
-
-    if applied:
-        avg_diff = sum(diffs) / len(diffs) if diffs else 0
-        logger.info(
-            f"AI ensemble applied to {len(applied)}/{len(tasks)} matches "
-            f"(weight={weight}, avg |ml-ai| = {avg_diff:.3f})"
-        )
-    return preds, applied
+    # Require a valid bookmaker line at min_odds or above
+    valid = [c for c in candidates if c[3] and c[3] >= settings.min_odds and c[3] <= settings.max_odds]
+    if not valid:
+        return None
+    # No value/edge logic — pick the market Claude is MOST CONFIDENT in among
+    # those with acceptable odds. Edge is still computed for the stats display.
+    market, pick, prob, book = max(valid, key=lambda c: c[2])
+    edge = prob * book - 1.0
+    fair = 1.0 / max(prob, 1e-6)
+    from src.signals.generator import _kelly
+    stake = _kelly(prob, book)
+    return Signal(
+        match_id=match_id,
+        market=market, pick=pick,
+        model_prob=float(prob), fair_odds=float(fair),
+        book_odds=float(book), edge=float(edge),
+        confidence=float(prob), stake_units=float(round(stake, 2)),
+        is_value=True,
+    )
 
 
 async def daily_cycle(bot) -> None:
-    """Refresh data, train if needed, generate signals, settle results."""
+    """Refresh data, settle results, run AI analysis, broadcast."""
     logger.info("Daily cycle start")
     await refresh_upcoming(days=7)
     await settle_pending()
-    await train_models(bot=bot)
     await generate_and_broadcast(bot)
 
 
