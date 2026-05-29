@@ -81,15 +81,11 @@ def filters_menu() -> InlineKeyboardMarkup:
     market_rows = [
         [
             InlineKeyboardButton(text="Исход 1X2", callback_data="filter:market:1X2"),
-            InlineKeyboardButton(text="Тотал 2.5", callback_data="filter:market:OU25"),
-            InlineKeyboardButton(text="Обе забьют", callback_data="filter:market:BTTS"),
+            InlineKeyboardButton(text="Тотал", callback_data="filter:market:TOTAL"),
+            InlineKeyboardButton(text="Фора", callback_data="filter:market:HANDICAP"),
         ],
-    ]
-    type_row = [
-        InlineKeyboardButton(text="🎯 Только VALUE", callback_data="filter:type:VALUE"),
-        InlineKeyboardButton(text="🤖 Все", callback_data="filter:type:ALL"),
     ]
     back_row = [InlineKeyboardButton(text="« Назад", callback_data="menu:back")]
     return InlineKeyboardMarkup(
-        inline_keyboard=[*league_rows, *market_rows, type_row, back_row]
+        inline_keyboard=[*league_rows, *market_rows, back_row]
     )

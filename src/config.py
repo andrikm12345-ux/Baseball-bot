@@ -58,10 +58,11 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite+aiosqlite:///./bot.db"
 
-    min_edge: float = 0.05
-    min_confidence: float = 0.55
-    min_odds: float = 1.80
+    min_edge: float = 0.03      # min divergence (Claude prob − market no-vig prob)
+    min_confidence: float = 0.56  # below this Claude is "passing" the match
+    min_odds: float = 1.90
     max_odds: float = 4.50
+    total_line: float = 2.5     # fallback display line only
 
     tz: str = "Europe/Moscow"
 

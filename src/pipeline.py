@@ -5,7 +5,6 @@ import json
 from datetime import datetime, timedelta
 from typing import List, Optional
 
-import pandas as pd
 from loguru import logger
 from sqlalchemy import select
 
@@ -14,40 +13,20 @@ from src.bot.formatters import format_signal
 from src.bot.handlers import broadcast_signal
 from src.config import settings
 from src.data.database import AiPrediction, Match, SessionLocal, Signal as SignalRow, Team
-from src.data.features import build_inference_features
 from src.data.football_api import FootballDataClient
 from src.data.ingest import ingest_history, ingest_upcoming
 from src.data.odds_api import OddsApiClient, fetch_odds_for_matches
-from src.signals.generator import Signal
+from src.data.settings_store import get_bool
+from src.signals.generator import Signal, _kelly
 from src.signals.tracker import settle_pending
 
 
-# ITB markets are never generated in AI-only mode, but the constant is still
-# referenced by the legacy-signal purge in main.py / handlers.py.
+# Legacy ITB markets — kept only so the startup purge in main.py / handlers.py
+# can still target old rows. Never generated anymore.
 DISABLED_MARKETS: set[str] = {
     "HOME_OVER05", "HOME_OVER15", "HOME_OVER25",
     "AWAY_OVER05", "AWAY_OVER15", "AWAY_OVER25",
 }
-
-
-async def _load_matches_df() -> pd.DataFrame:
-    async with SessionLocal() as session:
-        rows = (await session.execute(select(Match))).scalars().all()
-    if not rows:
-        return pd.DataFrame()
-    return pd.DataFrame([
-        {
-            "id": m.id,
-            "utc_date": m.utc_date,
-            "home_team_id": m.home_team_id,
-            "away_team_id": m.away_team_id,
-            "home_goals": m.home_goals,
-            "away_goals": m.away_goals,
-            "competition": m.competition,
-            "status": m.status,
-        }
-        for m in rows
-    ])
 
 
 async def bootstrap_history(seasons: List[int] | None = None) -> int:
@@ -72,28 +51,19 @@ async def refresh_upcoming(days: int = 7) -> int:
         await client.close()
 
 
-async def _store_signals(
-    signals: List[Signal], ai_match_ids: set[int] | None = None
-) -> List[SignalRow]:
-    """Persist signals, de-duplicating by (match, market, pick)."""
+async def _store_signals(signals: List[Signal]) -> List[SignalRow]:
+    """Persist signals — one per match (hard dedup across the whole table)."""
     stored: List[SignalRow] = []
-    ai_ids = ai_match_ids or set()
     async with SessionLocal() as session:
         for s in signals:
-            if s.market in DISABLED_MARKETS:
-                continue
-            # Hard dedup: one signal per match across the whole signals table.
-            # The earlier (match, market, pick) tuple let us publish two bets
-            # on the same fixture (e.g. 1X2 first hour, OU25 the next) which
-            # the user pushed back on as 'placing two bets on one game'.
             exists = (await session.execute(
                 select(SignalRow).where(SignalRow.match_id == s.match_id)
             )).first()
             if exists is not None:
                 continue
             row = SignalRow(
-                match_id=s.match_id, market=s.market, pick=s.pick,
-                is_ai_ensemble=(s.match_id in ai_ids),
+                match_id=s.match_id, market=s.market, pick=s.pick, line=s.line,
+                is_ai_ensemble=True,
                 model_prob=s.model_prob, fair_odds=s.fair_odds,
                 book_odds=s.book_odds, edge=s.edge, confidence=s.confidence,
                 stake_units=s.stake_units,
@@ -104,90 +74,78 @@ async def _store_signals(
     return stored
 
 
-async def generate_and_broadcast(bot) -> int:
-    """AI-only signal generation. Claude analyses every upcoming match;
-    we publish if the recommended pick has bookmaker odds >= settings.min_odds.
-    The admin '🧠 AI' toggle acts as the master on/off for signal generation.
+async def generate_and_broadcast(bot, hours: int = 4) -> int:
+    """AI-only generation. Claude sees real bookmaker lines (with no-vig market
+    probabilities) for each upcoming match and picks one bet by max positive
+    divergence. The admin '🧠 AI' toggle is the master on/off.
     """
-    from src.data.settings_store import get_bool
     if not await get_bool("ai_ensemble_enabled", False):
         logger.info("Signal generation paused (AI toggle OFF)")
         return 0
-    df = await _load_matches_df()
-    if df.empty:
-        return 0
-    finished = df[df["status"] == "FINISHED"].copy()
+
     now = datetime.utcnow()
-    horizon = now + timedelta(hours=4)
-    upcoming = df[
-        (df["status"] != "FINISHED")
-        & (df["utc_date"] >= now)
-        & (df["utc_date"] <= horizon)
-    ].copy()
-    if upcoming.empty:
-        logger.info("No upcoming matches in the next 4 hours")
-        return 0
-    feats = build_inference_features(upcoming, finished)
-    if feats.empty:
+    horizon = now + timedelta(hours=hours)
+    async with SessionLocal() as session:
+        upcoming = list((await session.execute(
+            select(Match).where(
+                Match.status != "FINISHED",
+                Match.utc_date >= now,
+                Match.utc_date <= horizon,
+            )
+        )).scalars())
+        if not upcoming:
+            logger.info(f"No upcoming matches in the next {hours}h")
+            return 0
+        # Skip matches that already have a signal
+        already = {
+            int(m) for m in (await session.execute(
+                select(SignalRow.match_id)
+                .where(SignalRow.match_id.in_([m.id for m in upcoming]))
+                .distinct()
+            )).scalars().all()
+        }
+        match_meta: dict[int, tuple[str, str, str, datetime]] = {}
+        for m in upcoming:
+            if m.id in already:
+                continue
+            home = await session.get(Team, m.home_team_id)
+            away = await session.get(Team, m.away_team_id)
+            if home and away:
+                match_meta[m.id] = (home.name, away.name, m.competition, m.utc_date)
+    if already:
+        logger.info(f"AI loop: skipping {len(already)} match(es) already signalled")
+    if not match_meta:
         return 0
 
-    # Pull odds for all candidate matches in one batch
+    # Pull real odds (all lines) for the candidate matches
     odds_map: dict[int, dict] = {}
     if settings.odds_api_key:
         odds_client = OddsApiClient(settings.odds_api_key)
         try:
-            async with SessionLocal() as session:
-                tuples = []
-                for mid in feats["match_id"].tolist():
-                    match = await session.get(Match, int(mid))
-                    if not match:
-                        continue
-                    home = await session.get(Team, match.home_team_id)
-                    away = await session.get(Team, match.away_team_id)
-                    if home and away:
-                        tuples.append((match.id, match.competition, home.name, away.name, match.utc_date))
+            tuples = [
+                (mid, comp, home, away, ko)
+                for mid, (home, away, comp, ko) in match_meta.items()
+            ]
             odds_map = await fetch_odds_for_matches(odds_client, tuples)
         finally:
             await odds_client.close()
-        logger.info(f"Pulled odds for {sum(1 for v in odds_map.values() if v)}/{len(feats)} matches")
-
-    # Skip matches we already published any signal on
-    async with SessionLocal() as session:
-        already = {
-            int(m) for m in (await session.execute(
-                select(SignalRow.match_id)
-                .where(SignalRow.match_id.in_([int(x) for x in feats["match_id"]]))
-                .distinct()
-            )).scalars().all()
-        }
-        match_meta: dict[int, tuple[str, str, str]] = {}
-        for mid in feats["match_id"].tolist():
-            if int(mid) in already:
-                continue
-            match = await session.get(Match, int(mid))
-            if not match:
-                continue
-            home = await session.get(Team, match.home_team_id)
-            away = await session.get(Team, match.away_team_id)
-            if home and away:
-                match_meta[int(mid)] = (home.name, away.name, match.competition)
-    if already:
-        logger.info(f"AI loop: skipping {len(already)} match(es) already signalled")
+        logger.info(f"Pulled odds for {len(odds_map)}/{len(match_meta)} matches")
 
     signals: List[Signal] = []
-    feats_by_id = {int(r["match_id"]): r.to_dict() for _, r in feats.iterrows()}
-    for mid, (home_name, away_name, comp) in match_meta.items():
+    for mid, (home_name, away_name, comp, _ko) in match_meta.items():
+        odds = odds_map.get(mid)
+        if not odds:
+            continue  # no real lines → nothing to bet on
         ai = await ai_predict(
-            match_id=mid, home=home_name, away=away_name, competition=comp,
-            features=feats_by_id.get(mid, {}),
+            match_id=mid, home=home_name, away=away_name, competition=comp, odds=odds,
         )
         if not ai:
             continue
-        sig = _ai_to_signal(mid, ai, odds_map.get(mid) or {})
+        sig = _ai_to_signal(mid, ai, odds)
         if sig is not None:
             signals.append(sig)
 
-    new_rows = await _store_signals(signals, ai_match_ids={s.match_id for s in signals})
+    new_rows = await _store_signals(signals)
     sent = 0
     if new_rows and bot:
         async with SessionLocal() as session:
@@ -212,55 +170,71 @@ async def generate_and_broadcast(bot) -> int:
                 text = format_signal(row, match, home, away, ai_comment)
                 sent += await broadcast_signal(bot, text)
     logger.info(
-        f"AI loop: {len(match_meta)} matches analysed, "
-        f"{len(signals)} signals, {sent} broadcast"
+        f"AI loop: {len(match_meta)} analysed, {len(signals)} signals, {sent} broadcast"
     )
     return len(new_rows)
 
 
-def _ai_to_signal(match_id: int, ai: dict, odds: dict) -> Optional[Signal]:
-    """Pick the best market for a match given Claude's probabilities and the
-    bookmaker line. Requires book odds >= settings.min_odds; otherwise None.
+def _find_line_odds(ai: dict, odds: dict) -> Optional[tuple[float, float]]:
+    """Return (book_odds, market_novig_prob) for Claude's chosen market/pick/line.
+
+    None if the chosen line/pick is not present in the bookmaker data.
     """
-    candidates = []
-    p_home, p_draw, p_away = ai.get("p_home", 0), ai.get("p_draw", 0), ai.get("p_away", 0)
-    best_1x2 = max(
-        [("HOME", p_home, odds.get("odds_home", 0.0)),
-         ("DRAW", p_draw, odds.get("odds_draw", 0.0)),
-         ("AWAY", p_away, odds.get("odds_away", 0.0))],
-        key=lambda x: x[1],
-    )
-    candidates.append(("1X2", *best_1x2))
-
-    p_over = ai.get("p_over25", 0.5)
-    if p_over >= 0.5:
-        candidates.append(("OU25", "OVER", p_over, odds.get("odds_over25", 0.0)))
-    else:
-        candidates.append(("OU25", "UNDER", 1 - p_over, odds.get("odds_under25", 0.0)))
-
-    p_btts = ai.get("p_btts", 0.5)
-    if p_btts >= 0.5:
-        candidates.append(("BTTS", "YES", p_btts, odds.get("odds_btts_yes", 0.0)))
-    else:
-        candidates.append(("BTTS", "NO", 1 - p_btts, odds.get("odds_btts_no", 0.0)))
-
-    # Require a valid bookmaker line at min_odds or above
-    valid = [c for c in candidates if c[3] and c[3] >= settings.min_odds and c[3] <= settings.max_odds]
-    if not valid:
+    market, pick, line = ai["market"], ai["pick"], ai.get("line")
+    if market == "1X2":
+        ml = odds.get("ml")
+        if not ml or ml.get("p_home") is None:
+            return None
+        side = {"HOME": ("home", "p_home"), "DRAW": ("draw", "p_draw"),
+                "AWAY": ("away", "p_away")}[pick]
+        o, p = ml.get(side[0]), ml.get(side[1])
+        return (o, p) if o and p is not None else None
+    if market == "TOTAL":
+        for t in odds.get("totals", []):
+            if line is not None and abs(t["point"] - line) < 0.01:
+                if pick == "OVER" and t.get("over") and t.get("over_novig") is not None:
+                    return t["over"], t["over_novig"]
+                if pick == "UNDER" and t.get("under") and t.get("under_novig") is not None:
+                    return t["under"], t["under_novig"]
         return None
-    # No value/edge logic — pick the market Claude is MOST CONFIDENT in among
-    # those with acceptable odds. Edge is still computed for the stats display.
-    market, pick, prob, book = max(valid, key=lambda c: c[2])
-    edge = prob * book - 1.0
-    fair = 1.0 / max(prob, 1e-6)
-    from src.signals.generator import _kelly
-    stake = _kelly(prob, book)
+    if market == "HANDICAP":
+        for h in odds.get("handicaps", []):
+            if line is not None and abs(h["point"] - line) < 0.01:
+                if pick == "HOME" and h.get("home") and h.get("home_novig") is not None:
+                    return h["home"], h["home_novig"]
+                if pick == "AWAY" and h.get("away") and h.get("away_novig") is not None:
+                    return h["away"], h["away_novig"]
+        return None
+    return None
+
+
+def _ai_to_signal(match_id: int, ai: dict, odds: dict) -> Optional[Signal]:
+    """Build a Signal from Claude's pick if it clears edge + odds thresholds.
+
+    Edge = Claude confidence − market no-vig probability (NOT conf*odds-1).
+    """
+    conf = float(ai["confidence"])
+    if conf < settings.min_confidence:
+        # Claude is passing the match (it returns ~0.50 when no value)
+        return None
+    found = _find_line_odds(ai, odds)
+    if not found:
+        logger.info(f"_ai_to_signal({match_id}): chosen line not in book data — reject")
+        return None
+    book, market_prob = found
+    edge = conf - market_prob
+    if edge < settings.min_edge:
+        return None
+    if book < settings.min_odds or book > settings.max_odds:
+        return None
+    fair = 1.0 / max(conf, 1e-6)
+    stake = _kelly(conf, book)
     return Signal(
         match_id=match_id,
-        market=market, pick=pick,
-        model_prob=float(prob), fair_odds=float(fair),
+        market=ai["market"], pick=ai["pick"], line=ai.get("line"),
+        model_prob=conf, fair_odds=fair,
         book_odds=float(book), edge=float(edge),
-        confidence=float(prob), stake_units=float(round(stake, 2)),
+        confidence=conf, stake_units=float(round(stake, 2)),
         is_value=True,
     )
 
@@ -304,6 +278,8 @@ async def daily_stats_broadcast(bot) -> None:
         )).scalars())
 
     def _calc(subset: list) -> RoiStats:
+        # Exclude pushes (won is None) from the ratios
+        subset = [r for r in subset if r.won is not None]
         if not subset:
             return RoiStats(0, 0, 0, 0, 0, 0.0, 0.0)
         staked = sum(r.stake_units for r in subset)
@@ -321,16 +297,13 @@ async def daily_stats_broadcast(bot) -> None:
         )
 
     y_total = _calc(rows)
-    y_model = _calc([r for r in rows if not r.book_odds or r.book_odds <= 1.0])
-    y_value = _calc([r for r in rows if r.book_odds and r.book_odds > 1.0])
-    y_ai = _calc([r for r in rows if getattr(r, "is_ai_ensemble", False)])
+    y_by_market = {m: _calc([r for r in rows if r.market == m])
+                   for m in ("1X2", "TOTAL", "HANDICAP")}
 
-    total = await roi_stats(only_value=None)
+    total = await roi_stats()
     text = format_daily_digest(
         yesterday_total=y_total,
-        yesterday_model=y_model,
-        yesterday_value=y_value,
-        yesterday_ai=y_ai,
+        yesterday_by_market=y_by_market,
         total=total,
         date_label=yesterday_msk_date.strftime("%d.%m.%Y"),
     )

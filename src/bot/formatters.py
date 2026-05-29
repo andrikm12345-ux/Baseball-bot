@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Iterable
 
 from src.data.database import Match, Signal, Team
 from src.signals.tracker import RoiStats
@@ -23,22 +22,22 @@ def msk_now() -> datetime:
     return datetime.utcnow() + MSK_OFFSET
 
 
-_MARKET_LABEL = {
-    "1X2": "Исход",
-    "OU25": "Тотал 2.5",
-    "BTTS": "Обе забьют",
-    "HOME_OVER05": "ИТБ1 0.5",
-    "HOME_OVER15": "ИТБ1 1.5",
-    "HOME_OVER25": "ИТБ1 2.5",
-    "AWAY_OVER05": "ИТБ2 0.5",
-    "AWAY_OVER15": "ИТБ2 1.5",
-    "AWAY_OVER25": "ИТБ2 2.5",
-}
+_MARKET_LABEL = {"1X2": "Исход", "TOTAL": "Тотал", "HANDICAP": "Фора"}
 _PICK_LABEL = {
     "HOME": "П1", "DRAW": "X", "AWAY": "П2",
-    "OVER": "Б", "UNDER": "М",
-    "YES": "Да", "NO": "Нет",
+    "OVER": "Больше", "UNDER": "Меньше",
 }
+
+
+def _market_pick_text(sig: Signal) -> str:
+    """Human-readable 'market + pick + line', e.g. 'Тотал Больше 2.5'."""
+    market = _MARKET_LABEL.get(sig.market, sig.market)
+    pick = _PICK_LABEL.get(sig.pick, sig.pick)
+    if sig.market == "TOTAL" and sig.line is not None:
+        return f"{market} {pick} {sig.line:g}"
+    if sig.market == "HANDICAP" and sig.line is not None:
+        return f"{market} {pick} ({sig.line:+g})"
+    return f"{market} {pick}"
 
 
 def format_signal(
@@ -49,13 +48,13 @@ def format_signal(
         f"<b>🧠 CLAUDE</b>  <i>{match.competition}</i>",
         f"⚽ <b>{home.name}</b> — <b>{away.name}</b>",
         f"🕒 {kickoff}",
-        f"📊 Рынок: <b>{_MARKET_LABEL.get(sig.market, sig.market)}</b>",
-        f"✅ Ставка: <b>{_PICK_LABEL.get(sig.pick, sig.pick)}</b>",
+        f"✅ Ставка: <b>{_market_pick_text(sig)}</b>",
         f"🔢 Уверенность Claude: <b>{sig.model_prob*100:.1f}%</b>",
     ]
     if sig.book_odds and sig.book_odds > 1.0:
         lines += [
             f"💰 Кф букмекера: <b>{sig.book_odds:.2f}</b>",
+            f"📈 Расхождение с рынком: <b>{sig.edge*100:+.1f}%</b>",
             f"💵 Стейк: <b>{sig.stake_units:.2f}</b> ед.",
         ]
     if ai_comment:
@@ -66,13 +65,11 @@ def format_signal(
 def format_daily_digest(
     *,
     yesterday_total: RoiStats,
-    yesterday_model: RoiStats,
-    yesterday_value: RoiStats,
-    yesterday_ai: RoiStats,
+    yesterday_by_market: dict,
     total: RoiStats,
     date_label: str,
 ) -> str:
-    """End-of-day broadcast: yesterday's result split by signal type + running totals."""
+    """End-of-day broadcast: yesterday's result split by market + running totals."""
 
     def _block(label: str, s: RoiStats) -> str:
         if s.n_settled == 0:
@@ -92,13 +89,11 @@ def format_daily_digest(
     if yesterday_total.n_settled == 0:
         lines.append("Вчера закрытых ставок не было.")
     else:
-        lines += [
-            _block("🤖 MODEL", yesterday_model),
-            _block("🎯 VALUE", yesterday_value),
-            _block("🧠 AI    ", yesterday_ai),
-            "─",
-            _block("<b>ИТОГО</b>", yesterday_total),
-        ]
+        for m in ("1X2", "TOTAL", "HANDICAP"):
+            s = yesterday_by_market.get(m)
+            if s and s.n_settled:
+                lines.append(_block(_MARKET_TITLE.get(m, m), s))
+        lines += ["─", _block("<b>ИТОГО</b>", yesterday_total)]
     lines += [
         "",
         "<b>За всё время:</b>",
@@ -167,49 +162,10 @@ def format_signal_short(sigs: list[Signal]) -> str:
     return f"🤖 {market} {pick} · уверенность {best.confidence*100:.0f}%{ai_tag}"
 
 
-def format_training_report(m: dict) -> str:
-    def _arrow(d: float) -> str:
-        if abs(d) < 0.001:
-            return "≈"
-        return "↓" if d < 0 else "↑"
-
-    diff = m.get("diff_vs_prev", {})
-    walk = m.get("walk_forward", {})
-    lines = [
-        "🎓 <b>МОДЕЛЬ ПЕРЕОБУЧЕНА</b>",
-        "━━━━━━━━━━━━━━━━━━━━━",
-        f"Матчей в выборке: <b>{m['n_train']}</b>",
-        "",
-        "<b>Качество (in-sample):</b>",
-        f"• 1X2 logloss: <b>{m['1x2_logloss']:.4f}</b> "
-        f"{_arrow(diff.get('1x2_logloss', 0))} {abs(diff.get('1x2_logloss', 0)):.4f}",
-        f"• OU2.5 Brier: <b>{m['ou_brier']:.4f}</b> "
-        f"{_arrow(diff.get('ou_brier', 0))} {abs(diff.get('ou_brier', 0)):.4f}",
-        f"• BTTS Brier: <b>{m['btts_brier']:.4f}</b> "
-        f"{_arrow(diff.get('btts_brier', 0))} {abs(diff.get('btts_brier', 0)):.4f}",
-    ]
-    if walk:
-        lines += [
-            "",
-            "<b>Честная проверка (walk-forward CV):</b>",
-            f"• 1X2: <b>{walk.get('1x2_logloss', 0):.4f}</b>",
-            f"• OU2.5: <b>{walk.get('ou_brier', 0):.4f}</b>",
-            f"• BTTS: <b>{walk.get('btts_brier', 0):.4f}</b>",
-        ]
-    if m.get("top_features"):
-        lines += ["", "<b>Главные фичи (важность):</b>"]
-        for f in m["top_features"]:
-            lines.append(f"  • {f}")
-    lines.append("\n<i>Низкие logloss/Brier = лучше. Стрелки — изменение от прошлого обучения.</i>")
-    return "\n".join(lines)
+_MARKET_TITLE = {"1X2": "Исход 1X2", "TOTAL": "Тотал", "HANDICAP": "Фора"}
 
 
-def format_stats_table(
-    model_s: RoiStats,
-    value_s: RoiStats,
-    ai_s: RoiStats,
-    total_s: RoiStats,
-) -> str:
+def format_stats_table(total_s: RoiStats, by_market: dict) -> str:
     def _row(label: str, s: RoiStats) -> str:
         if s.n_settled == 0:
             return f"{label}  —  пока нет ставок"
@@ -220,14 +176,16 @@ def format_stats_table(
             f"  ROI: <b>{s.roi:+.2f}%</b> · Прибыль: <b>{s.profit:+.2f}</b> ед."
         )
 
+    market_blocks = "\n\n".join(
+        _row(_MARKET_TITLE.get(m, m), by_market[m]) for m in ("1X2", "TOTAL", "HANDICAP")
+    )
     return (
         "<b>📈 СТАТИСТИКА</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
-        f"{_row('🤖 MODEL (без линий)', model_s)}\n\n"
-        f"{_row('🎯 VALUE (edge ≥ 5%)', value_s)}\n\n"
-        f"{_row('🧠 AI-ансамбль', ai_s)}\n"
+        f"{_row('ИТОГО', total_s)}\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
-        f"{_row('ИТОГО', total_s)}"
+        "<b>По рынкам:</b>\n\n"
+        f"{market_blocks}"
     )
 
 

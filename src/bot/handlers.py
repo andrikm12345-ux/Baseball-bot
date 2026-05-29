@@ -21,7 +21,7 @@ from loguru import logger
 from sqlalchemy import and_, select
 
 from src.bot.access import is_allowed
-from src.bot.formatters import HELP, WELCOME, fmt_msk, format_roi, format_signal, format_signal_short, format_stats_table
+from src.bot.formatters import HELP, WELCOME, fmt_msk, format_signal, format_signal_short, format_stats_table
 from src.bot.keyboards import admin_menu, filters_menu, main_menu, user_menu
 from src.config import settings
 from src.data.database import Match, PendingUser, SessionLocal, Signal, Subscriber, Team
@@ -149,7 +149,7 @@ async def cmd_unsubscribe(msg: Message) -> None:
 
 @router.message(Command("signals"))
 async def cmd_signals(msg: Message) -> None:
-    await _send_signals(msg, league=None, market=None, only_value=False)
+    await _send_signals(msg)
 
 
 @router.message(Command("today"))
@@ -327,7 +327,7 @@ async def cmd_breakdown(msg: Message) -> None:
             )
         return lines
 
-    market_label = {"1X2": "1X2", "OU25": "Тотал 2.5", "BTTS": "Обе забьют"}
+    market_label = {"1X2": "Исход 1X2", "TOTAL": "Тотал", "HANDICAP": "Фора"}
     market_rows = [
         (market_label.get(label, label), n, won, roi, profit)
         for label, n, won, roi, profit in _agg(by_market)
@@ -493,7 +493,7 @@ async def btn_stats(msg: Message) -> None:
 
 @router.message(F.text == "🎯 Сигналы")
 async def btn_signals(msg: Message) -> None:
-    await _send_signals(msg, league=None, market=None, only_value=False)
+    await _send_signals(msg)
 
 
 @router.message(F.text == "📅 Сегодня")
@@ -690,7 +690,7 @@ async def cb_menu(q: CallbackQuery) -> None:
     action = q.data.split(":", 1)[1]
     await q.answer()
     if action == "signals":
-        await _send_signals(q.message, league=None, market=None, only_value=False)
+        await _send_signals(q.message)
     elif action == "today":
         await _send_today(q.message)
     elif action == "stats":
@@ -730,12 +730,9 @@ async def cb_filter(q: CallbackQuery) -> None:
     _, kind, value = q.data.split(":", 2)
     await q.answer()
     if kind == "league":
-        await _send_signals(q.message, league=value, market=None, only_value=False)
+        await _send_signals(q.message, league=value)
     elif kind == "market":
-        await _send_signals(q.message, league=None, market=value, only_value=False)
-    elif kind == "type":
-        only_value = value == "VALUE"
-        await _send_signals(q.message, league=None, market=None, only_value=only_value)
+        await _send_signals(q.message, market=value)
 
 
 # ─────────────────────────── HELPERS ───────────────────────────
@@ -773,9 +770,8 @@ async def _unsubscribe(chat_id: int) -> None:
 
 async def _send_signals(
     msg: Message,
-    league: Optional[str],
-    market: Optional[str],
-    only_value: bool,
+    league: Optional[str] = None,
+    market: Optional[str] = None,
 ) -> None:
     now = datetime.utcnow()
     horizon = now + timedelta(days=3)
@@ -789,11 +785,6 @@ async def _send_signals(
             stmt = stmt.where(Match.competition == league)
         if market:
             stmt = stmt.where(Signal.market == market)
-        else:
-            from src.pipeline import DISABLED_MARKETS
-            stmt = stmt.where(Signal.market.notin_(DISABLED_MARKETS))
-        if only_value:
-            stmt = stmt.where(Signal.book_odds > 1.0)
         stmt = stmt.order_by(Signal.edge.desc(), Signal.confidence.desc()).limit(10)
         pairs = (await session.execute(stmt)).all()
         if not pairs:
@@ -802,9 +793,8 @@ async def _send_signals(
         for sig, match in pairs:
             home = await session.get(Team, match.home_team_id)
             away = await session.get(Team, match.away_team_id)
-            ai_text = sig.commentary if getattr(sig, "is_ai_ensemble", False) else None
             await msg.answer(
-                format_signal(sig, match, home, away, ai_text),
+                format_signal(sig, match, home, away, sig.commentary),
                 parse_mode="HTML",
             )
 
@@ -837,11 +827,13 @@ async def _send_today(msg: Message) -> None:
 
 
 async def _send_stats(msg: Message) -> None:
-    model_s = await roi_stats(only_value=False)
-    value_s = await roi_stats(only_value=True)
-    ai_s = await roi_stats(only_value=None, ai_only=True)
-    total_s = await roi_stats(only_value=None)
-    text = format_stats_table(model_s, value_s, ai_s, total_s)
+    total_s = await roi_stats()
+    by_market = {
+        "1X2": await roi_stats(market="1X2"),
+        "TOTAL": await roi_stats(market="TOTAL"),
+        "HANDICAP": await roi_stats(market="HANDICAP"),
+    }
+    text = format_stats_table(total_s, by_market)
     await msg.answer(text, parse_mode="HTML")
 
 

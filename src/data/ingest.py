@@ -4,7 +4,6 @@ from datetime import datetime
 from typing import Iterable, List
 
 from loguru import logger
-from sqlalchemy import select
 
 from src.data.database import Match, SessionLocal, Team
 from src.data.football_api import FootballDataClient

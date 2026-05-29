@@ -55,12 +55,17 @@ def _resolve_provider() -> tuple[str, str, str, str]:
     return "anthropic", "https://api.anthropic.com/v1/messages", settings.anthropic_api_key, model
 
 
-async def _call_openai(url: str, key: str, model: str, prompt: str, max_tokens: int = 350) -> Optional[str]:
-    body = {
-        "model": model,
-        "max_tokens": max_tokens,
-        "messages": [{"role": "user", "content": prompt}],
-    }
+async def _call_openai(
+    url: str, key: str, model: str, prompt: str, max_tokens: int = 350,
+    system: Optional[str] = None, temperature: Optional[float] = None,
+) -> Optional[str]:
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    body: dict = {"model": model, "max_tokens": max_tokens, "messages": messages}
+    if temperature is not None:
+        body["temperature"] = temperature
     headers = {
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
@@ -79,12 +84,19 @@ async def _call_openai(url: str, key: str, model: str, prompt: str, max_tokens: 
         return None
 
 
-async def _call_anthropic(url: str, key: str, model: str, prompt: str, max_tokens: int = 350) -> Optional[str]:
-    body = {
+async def _call_anthropic(
+    url: str, key: str, model: str, prompt: str, max_tokens: int = 350,
+    system: Optional[str] = None, temperature: Optional[float] = None,
+) -> Optional[str]:
+    body: dict = {
         "model": model,
         "max_tokens": max_tokens,
         "messages": [{"role": "user", "content": prompt}],
     }
+    if system:
+        body["system"] = system
+    if temperature is not None:
+        body["temperature"] = temperature
     headers = {
         "x-api-key": key,
         "anthropic-version": "2023-06-01",
@@ -102,14 +114,19 @@ async def _call_anthropic(url: str, key: str, model: str, prompt: str, max_token
     ).strip()
 
 
-async def call_llm(prompt: str, max_tokens: int = 350) -> Optional[str]:
+async def call_llm(
+    prompt: str, max_tokens: int = 350,
+    system: Optional[str] = None, temperature: Optional[float] = None,
+) -> Optional[str]:
     mode, url, key, model = _resolve_provider()
     if not key:
         return None
     try:
         if mode == "openai":
-            return await _call_openai(url, key, model, prompt, max_tokens=max_tokens)
-        return await _call_anthropic(url, key, model, prompt, max_tokens=max_tokens)
+            return await _call_openai(url, key, model, prompt, max_tokens=max_tokens,
+                                      system=system, temperature=temperature)
+        return await _call_anthropic(url, key, model, prompt, max_tokens=max_tokens,
+                                     system=system, temperature=temperature)
     except asyncio.TimeoutError:
         logger.warning("LLM timeout")
         return None

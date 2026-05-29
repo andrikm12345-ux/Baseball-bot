@@ -76,6 +76,42 @@ BTTS_NAMES = {
     "btts", "both teams to score", "both_teams_to_score",
     "gg/ng", "both score",
 }
+HANDICAP_NAMES = {
+    "handicap", "asian handicap", "asian_handicap", "ah",
+    "goal handicap", "european handicap", "spread", "spreads",
+    "handicap result", "goals handicap",
+}
+
+
+# ─────────────────────────── no-vig helpers ───────────────────────────
+
+
+def novig_two_way(odd_a: Optional[float], odd_b: Optional[float]) -> Optional[Tuple[float, float]]:
+    """Remove the bookmaker margin from a 2-outcome market.
+
+    Returns (p_a, p_b) normalised to sum to 1, or None if either price missing.
+    """
+    if not odd_a or not odd_b or odd_a <= 1 or odd_b <= 1:
+        return None
+    ia, ib = 1.0 / odd_a, 1.0 / odd_b
+    s = ia + ib
+    if s <= 0:
+        return None
+    return ia / s, ib / s
+
+
+def novig_three_way(
+    odd_home: Optional[float], odd_draw: Optional[float], odd_away: Optional[float]
+) -> Optional[Tuple[float, float, float]]:
+    """Remove margin from the 3-outcome 1X2 market (football has a draw!)."""
+    odds = [odd_home, odd_draw, odd_away]
+    if any((not o or o <= 1) for o in odds):
+        return None
+    inv = [1.0 / o for o in odds]
+    s = sum(inv)
+    if s <= 0:
+        return None
+    return inv[0] / s, inv[1] / s, inv[2] / s
 
 
 class OddsApiClient:
@@ -304,35 +340,46 @@ def _market_line(market: Dict[str, Any]) -> Optional[float]:
     return None
 
 
+def _entry_line(entry: Dict[str, Any]) -> Optional[float]:
+    for key in ("hdp", "handicap", "line", "point", "total"):
+        if key in entry:
+            try:
+                return round(float(entry[key]) * 4) / 4  # snap to nearest 0.25
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
 def extract_odds(
     odds_payload: Dict[str, Any],
-    home_name: str,
-    away_name: str,
+    home_name: str = "",
+    away_name: str = "",
     event_home: str = "",
     event_away: str = "",
-) -> Dict[str, float]:
-    """Parse odds-api.io payload and aggregate max odd per pick.
+) -> Dict[str, Any]:
+    """Parse odds-api.io payload into a structured, multi-line shape.
 
-    Observed odds-api.io market shape:
-      {"name": "ML", "odds": [{"home": "2.7", "draw": "3.4", "away": "2.6"}]}
-      {"name": "Goals Over/Under",
-       "odds": [{"hdp": 1.5, "over": "...", "under": "..."},
-                {"hdp": 2.5, "over": "1.727", "under": "2.100"}, ...]}
-      {"name": "Both Teams To Score", "odds": [{"yes": "1.533", "no": "2.375"}]}
-    Prices come as strings, lines come as numbers in "hdp". Some markets like
-    "Totals" share names with OU but use a different handicap (e.g. 2.75) —
-    we strictly require hdp == 2.5 for our totals signal.
+    Returns:
+      {
+        "ml": {"home", "draw", "away", "p_home", "p_draw", "p_away"} | None,
+        "totals": [{"point", "over", "under", "over_novig", "under_novig"}, ...],
+        "handicaps": [{"point", "home", "away", "home_novig", "away_novig"}, ...],
+      }
+
+    Prices come as strings, lines as numbers in "hdp". We keep ALL total and
+    handicap lines (1.5 / 2.5 / 3.5 / -0.5 …), taking the max odd per
+    (line, side) across the books we pay for, then compute a no-vig market
+    probability for each.
     """
-    aggregated: Dict[str, List[float]] = {
-        "odds_home": [], "odds_draw": [], "odds_away": [],
-        "odds_over25": [], "odds_under25": [],
-        "odds_btts_yes": [], "odds_btts_no": [],
-    }
+    ml_agg: Dict[str, List[float]] = {"home": [], "draw": [], "away": []}
+    totals_agg: Dict[float, Dict[str, List[float]]] = {}
+    hcap_agg: Dict[float, Dict[str, List[float]]] = {}
+
     books = odds_payload.get("bookmakers") or {}
     if isinstance(books, list):
         books = {str(b.get("name") or b.get("key") or i): b.get("markets", b) for i, b in enumerate(books)}
     if not isinstance(books, dict):
-        return {k: 0.0 for k in aggregated}
+        return {"ml": None, "totals": [], "handicaps": []}
 
     unknown_markets: set[str] = set()
 
@@ -351,44 +398,70 @@ def extract_odds(
                 for entry in odds_list:
                     if not isinstance(entry, dict):
                         continue
-                    h = _as_float(entry.get("home"))
-                    d = _as_float(entry.get("draw"))
-                    a = _as_float(entry.get("away"))
-                    if h: aggregated["odds_home"].append(h)
-                    if d: aggregated["odds_draw"].append(d)
-                    if a: aggregated["odds_away"].append(a)
+                    h, d, a = (_as_float(entry.get("home")), _as_float(entry.get("draw")),
+                               _as_float(entry.get("away")))
+                    if h: ml_agg["home"].append(h)
+                    if d: ml_agg["draw"].append(d)
+                    if a: ml_agg["away"].append(a)
             elif name in OU_NAMES:
                 for entry in odds_list:
                     if not isinstance(entry, dict):
                         continue
-                    # Strict: require hdp == 2.5. Markets like "Totals" with
-                    # hdp 2.75 are not what we predict.
-                    hdp = entry.get("hdp")
-                    try:
-                        hdp_f = float(hdp) if hdp is not None else None
-                    except (TypeError, ValueError):
-                        hdp_f = None
-                    if hdp_f is None or abs(hdp_f - 2.5) > 0.01:
+                    pt = _entry_line(entry)
+                    over, under = _as_float(entry.get("over")), _as_float(entry.get("under"))
+                    if pt is None or (not over and not under):
                         continue
-                    over = _as_float(entry.get("over"))
-                    under = _as_float(entry.get("under"))
-                    if over: aggregated["odds_over25"].append(over)
-                    if under: aggregated["odds_under25"].append(under)
-            elif name in BTTS_NAMES:
+                    slot = totals_agg.setdefault(pt, {"over": [], "under": []})
+                    if over: slot["over"].append(over)
+                    if under: slot["under"].append(under)
+            elif name in HANDICAP_NAMES:
                 for entry in odds_list:
                     if not isinstance(entry, dict):
                         continue
-                    yes = _as_float(entry.get("yes"))
-                    no = _as_float(entry.get("no"))
-                    if yes: aggregated["odds_btts_yes"].append(yes)
-                    if no: aggregated["odds_btts_no"].append(no)
-            else:
+                    pt = _entry_line(entry)
+                    h, a = _as_float(entry.get("home")), _as_float(entry.get("away"))
+                    if pt is None or (not h and not a):
+                        continue
+                    slot = hcap_agg.setdefault(pt, {"home": [], "away": []})
+                    if h: slot["home"].append(h)
+                    if a: slot["away"].append(a)
+            elif name not in BTTS_NAMES:
                 unknown_markets.add(name)
 
     if unknown_markets:
         logger.debug(f"odds-api.io: unhandled market names: {sorted(unknown_markets)[:10]}")
 
-    return {k: (max(v) if v else 0.0) for k, v in aggregated.items()}
+    ml = None
+    if ml_agg["home"] and ml_agg["draw"] and ml_agg["away"]:
+        oh, od, oa = max(ml_agg["home"]), max(ml_agg["draw"]), max(ml_agg["away"])
+        nv = novig_three_way(oh, od, oa)
+        ml = {"home": oh, "draw": od, "away": oa}
+        if nv:
+            ml.update(p_home=nv[0], p_draw=nv[1], p_away=nv[2])
+
+    totals = []
+    for pt, sides in sorted(totals_agg.items()):
+        over = max(sides["over"]) if sides["over"] else None
+        under = max(sides["under"]) if sides["under"] else None
+        nv = novig_two_way(over, under)
+        totals.append({
+            "point": pt, "over": over, "under": under,
+            "over_novig": nv[0] if nv else None,
+            "under_novig": nv[1] if nv else None,
+        })
+
+    handicaps = []
+    for pt, sides in sorted(hcap_agg.items()):
+        h = max(sides["home"]) if sides["home"] else None
+        a = max(sides["away"]) if sides["away"] else None
+        nv = novig_two_way(h, a)
+        handicaps.append({
+            "point": pt, "home": h, "away": a,
+            "home_novig": nv[0] if nv else None,
+            "away_novig": nv[1] if nv else None,
+        })
+
+    return {"ml": ml, "totals": totals, "handicaps": handicaps}
 
 
 # ─────────────────────────── top-level orchestration ───────────────────────────
@@ -407,7 +480,7 @@ def _is_upcoming(ev: Dict[str, Any], now: datetime) -> bool:
 async def fetch_odds_for_matches(
     client: OddsApiClient,
     upcoming: List[Tuple[int, str, str, str, datetime]],
-) -> Dict[int, Dict[str, float]]:
+) -> Dict[int, Dict[str, Any]]:
     """upcoming: (match_id, competition, home_name, away_name, utc_date).
 
     Strategy: per-league /events call using slugs from COMPETITION_TO_LEAGUE
@@ -457,7 +530,7 @@ async def fetch_odds_for_matches(
             continue
         ev_home, ev_away = _event_teams(ev)
         odds = extract_odds(payload, home, away, ev_home, ev_away)
-        if any(v > 0 for v in odds.values()):
+        if odds.get("ml") or odds.get("totals") or odds.get("handicaps"):
             out[match_id] = odds
 
     return out

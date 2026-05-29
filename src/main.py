@@ -24,9 +24,43 @@ from src.pipeline import (
 from src.signals.tracker import settle_pending
 
 
+async def _setup_commands(bot: Bot) -> None:
+    """Register the slash-command menu shown in Telegram's "/" picker."""
+    from aiogram.types import (
+        BotCommand, BotCommandScopeChat, BotCommandScopeDefault,
+    )
+    user_cmds = [
+        BotCommand(command="signals", description="🎯 Текущие ставки"),
+        BotCommand(command="today", description="📅 Матчи сегодня"),
+        BotCommand(command="stats", description="📈 ROI и статистика"),
+        BotCommand(command="chart", description="📊 График прибыли"),
+        BotCommand(command="history", description="📜 История ставок"),
+        BotCommand(command="help", description="ℹ️ Как работает бот"),
+        BotCommand(command="menu", description="📋 Меню"),
+        BotCommand(command="start", description="🚀 Старт"),
+    ]
+    try:
+        await bot.set_my_commands(user_cmds, scope=BotCommandScopeDefault())
+        admin_cmds = user_cmds + [
+            BotCommand(command="diag", description="🩺 Диагностика сигналов"),
+            BotCommand(command="breakdown", description="🔬 ROI по рынкам/лигам"),
+            BotCommand(command="allowed", description="👥 Список подписчиков"),
+            BotCommand(command="allow", description="✅ Открыть доступ"),
+            BotCommand(command="deny", description="🚫 Закрыть доступ"),
+        ]
+        for admin_id in settings.admin_ids:
+            try:
+                await bot.set_my_commands(admin_cmds, scope=BotCommandScopeChat(chat_id=admin_id))
+            except Exception as e:
+                logger.warning(f"set_my_commands for admin {admin_id} failed: {e}")
+    except Exception as e:
+        logger.warning(f"set_my_commands failed: {e}")
+
+
 async def _on_startup(bot: Bot) -> None:
     await init_db()
     logger.info("DB initialised")
+    await _setup_commands(bot)
     await _purge_disabled_market_signals()
     # On the very first boot, bootstrap history in the background so the
     # bot is responsive immediately.
